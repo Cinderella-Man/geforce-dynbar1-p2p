@@ -6,7 +6,8 @@ cards, so CUDA, NCCL and vLLM stage every GPU-to-GPU copy through host memory; w
 card. It builds on the P2P patches of tinygrad, aikitoria, Duanyll and dingiv (Credits).
 
 Formerly `3080-20g-p2p`; GitHub redirects the old links. Verified only on a pair of memory-modded RTX 3080 20GB cards
-(see Tested on).
+(see Tested on). Other GA102 cards get P2P by default but are untested. Turing, the other Ampere chips and Ada are
+opt-in: you run the integrity test on your pair, then turn P2P on per card (Opt-in for other chips).
 
 ## Disclaimer
 
@@ -22,26 +23,75 @@ patch: it can hang the machine or corrupt memory.
 - `intel_iommu=on iommu=pt`, ACS left on
 - Linux kernel 7.0.14 (Proxmox), NVIDIA driver userspace 615.71.09
 
-Other GA102 cards (RTX 3080, 3080 Ti, 3090, GA102 A-series) take the same code path but are untested.
 If you tried it on other cards or another platform, please file a
-[compatibility report](https://github.com/noon-at-cgn/geforce-dynbar1-p2p/issues/new?template=compatibility-report.md).
+[compatibility report](https://github.com/noon-at-cgn/geforce-dynbar1-p2p/issues/new?template=compatibility-report.md)
+with the report file of `p2p-check.sh --integrity`.
+
+## Which chips
+
+The scripts tell the chip from the card's PCI device id (NVIDIA gives each chip a block of ids; table in
+`contrib/chips.sh`, checked against the PCI ID database) and cross-check the architecture with nvidia-smi.
+`contrib/p2p-check.sh --pairs` (no root needed) lists every NVIDIA card and the verdict for each pair.
+
+| Chip | Cards, for example | P2P with this driver |
+|---|---|---|
+| GA102: RTX 3080 20GB (`10de:2206`, 20 GB) | the memory-modded card of Tested on | **verified**, on by default |
+| GA102: every other card | RTX 3080, 3080 Ti, 3090, 3090 Ti; RTX A4500-A6000, A10, A40 | on by default, untested: run the integrity test once and please report |
+| TU102, TU104, TU106, TU116, TU117 | RTX 20 series, GTX 16 series, Quadro RTX, T4 | opt-in, untested |
+| GA103, GA104, GA106, GA107 | RTX 3050-3070 Ti, RTX A2000, A4000 | opt-in, untested |
+| AD102, AD103, AD104, AD106, AD107 | RTX 40 series, RTX 6000 Ada, L4, L40 | opt-in, untested |
+| GB202, GB203, GB205, GB206, GB207 | RTX 50 series, RTX PRO Blackwell | stock: NVIDIA's own driver offers BAR1 P2P; left as stock |
+| GA100, GH100, GB100 and later datacenter chips | A100, H100, B200 | not a target of this patch |
+
+Professional and datacenter GA102 boards (RTX A-series, A10, A40) can get P2P from NVIDIA's own driver through its
+mailbox protocol. This driver arms every GA102 for the dynamic BAR1 route and turns that mailbox route off, so such a
+board loses its stock P2P here unless it meets the dynamic route's conditions (BAR1 at least VRAM,
+`RMForceStaticBar1=0`). This is read from the driver source and untested on such boards.
+
+`p2p-check.sh` reports one of these per pair:
+
+- `verified (on, ...)`: both cards RTX 3080 20GB; P2P is on unless you turn it off.
+- `on by default, untested (...)`: GA102 cards other than the RTX 3080 20GB; the driver turns P2P on, nobody has
+  reported them yet: run `p2p-check.sh --integrity` once and please send a compatibility report.
+- `opted in (on, ...)`: every card that is not GA102 has `RMDynBar1P2PEnable=1`; please send a compatibility report.
+- `untested (...): run p2p-check.sh --integrity ..., then enable with: p2p-enable.sh --yes <cards>`: an opt-in chip
+  without the key, or a card with static BAR1 (the driver refuses the pair). Static BAR1: geforce-bar1-resize sets
+  `RMForceStaticBar1=0` by default (`DRIVER_OPTION=auto`) only for cards it enlarges through `0x610`; a card that
+  only needed a resize, or whose firmware already gives it a large BAR1 (stock ReBAR Ampere and Ada), keeps static
+  BAR1 until `driver_option=on` is set for it, which dynamic BAR1 P2P needs. `p2p-enable.sh` sets it.
+- `off (...)`: a card has `RMDynBar1P2PEnable` set to something other than 1.
+- `stock (...)`: GeForce Blackwell. NVIDIA's own BAR1 P2P on GB20x maps all of VRAM (static BAR1); with
+  `RMForceStaticBar1=0` from geforce-bar1-resize that route is off, and the check says so (`driver_option=off` for
+  the card in geforce-bar1-resize keeps static BAR1). This reading of the stock rule comes from the driver source;
+  untested on Blackwell hardware.
+- `not supported (...)`: with the reason. Among them: the two cards are of different architectures (Turing, Ampere,
+  Ada): CUDA itself (libcuda) offers no peer access between architectures, whatever the kernel driver says; BAR1
+  smaller than VRAM; a datacenter or unknown chip.
+
+A chip moves from opt-in to on by default (a driver change, in a later release) once passing compatibility reports
+come in for it.
 
 ## Requirements
 
-- The 32 GiB BAR1 from [geforce-bar1-resize](https://github.com/noon-at-cgn/geforce-bar1-resize), with
-  `RMForceStaticBar1=0` set for each card (its `zz-geforce-bar1-resize.conf`). The NVIDIA driver must load from the
-  root file system. By default geforce-bar1-resize sets `RMForceStaticBar1=0` only for cards it enlarges through
-  `0x610`, so a card that already lists its size (e.g. a stock-ReBAR RTX 3090) keeps static BAR1 and gets no P2P: set
-  `driver_option=on` for that card (or `DRIVER_OPTION=on`) in `/etc/geforce-bar1-resize.conf`, run
-  `sudo geforce-bar1-resize driver-option --write`, then reboot.
+- A BAR1 at least as large as VRAM on each card, from
+  [geforce-bar1-resize](https://github.com/noon-at-cgn/geforce-bar1-resize), with `RMForceStaticBar1=0` set for each
+  card (its `zz-geforce-bar1-resize.conf`). The NVIDIA driver must load from the root file system. By default
+  geforce-bar1-resize sets `RMForceStaticBar1=0` only for cards it enlarges through `0x610`, so a card that already
+  lists its size (e.g. a stock-ReBAR RTX 3090) keeps static BAR1 and gets no P2P: set `driver_option=on` for that card
+  (or `DRIVER_OPTION=on`) in `/etc/geforce-bar1-resize.conf`, run `sudo geforce-bar1-resize driver-option --write`,
+  then reboot. `p2p-enable.sh` sets `driver_option=on` and the opt-in key (`keys=`) there and runs that command.
 - NVIDIA userspace (libcuda, nvidia-smi) of exactly 615.71.09, and a stock 615.71.09 kernel module for the fallback.
-- The GSP firmware of 615.71.09 (`gsp_ga10x.bin` and `ucodes_ga10x.bin` in `/lib/firmware/nvidia/615.71.09/`, or
-  below another directory the kernel's firmware loader searches, also `.xz` or `.zst`; the `firmware/` directory of
-  NVIDIA's `.run`, which its installer copies there). Without it RM init fails on every GPU; `p2p-load.sh` and
-  `p2p-install.sh` refuse before changing anything.
+- The GSP firmware of 615.71.09 for your cards' chip family in `/lib/firmware/nvidia/615.71.09/`: `gsp_ga10x.bin` and
+  `ucodes_ga10x.bin` for GA10x and Ada, `gsp_tu10x.bin` and `ucodes_tu10x.bin` for Turing (or below another directory
+  the kernel's firmware loader searches, also `.xz` or `.zst`; the `firmware/` directory of NVIDIA's `.run`, which its
+  installer copies there). Without it RM init fails on every GPU; `p2p-load.sh` and `p2p-install.sh` refuse before
+  changing anything.
 - Kernel headers for the running kernel, `make` and the compiler the kernel was built with.
 - IOMMU off, or in passthrough mode (`iommu=pt`).
 - Secure Boot off, or the modules signed with a key the machine trusts.
+- For the integrity test: the CUDA toolkit (`nvcc`, any version that supports your GPU and driver 615.71.09). Built
+  with CUDA 13.0; CUDA 12.8 fails on glibc 2.41's math headers (`cospi`/`sinpi` exception specification), so on such
+  a system use a newer toolkit.
 
 ## Results
 
@@ -79,13 +129,14 @@ each allocation a peer accesses gets its own window in the owner's BAR1 when it 
 when it is unmapped. Nothing maps all of VRAM, so with `RMForceStaticBar1=0` all of VRAM stays host-visible.
 
 P2P is on by default for pairs of GA102 GPUs (detected by chip family). Other chips use the route only with
-`RMDynBar1P2PEnable=1`; pairs with no such GPU, and static-BAR1 pairs that stock NVIDIA supports, behave as stock.
-A pair is refused when either card is not GA102 and not enabled by the key, has `RMDynBar1P2PEnable` set to anything
-but 1 (the off switch), has static BAR1 active (no `RMForceStaticBar1=0`), has BAR1 smaller than VRAM, or has a
-non-zero `nv_dynbar1_calib`/`nv_dynbar1_delta`, or when `RMForceP2PType`/`RMPcieP2PType` excludes BAR1 P2P. A refused
-pair gets no peer access (`cudaDeviceCanAccessPeer` 0, copies staged through the host) and rate-limited `DynBar1P2P:`
-error lines in the kernel log naming the card and the reason. Like every consumer P2P patch, on GA102 it skips
-NVIDIA's chipset, topology and host checks. Tested only on X99 / Xeon E5 v4, two CPU root ports, no switch, `iommu=pt`.
+`RMDynBar1P2PEnable=1`, read per card; pairs with no such GPU, and static-BAR1 pairs that stock NVIDIA supports, behave
+as stock. A pair is refused when either card is not GA102 and not enabled by the key, has `RMDynBar1P2PEnable` set to
+anything but 1 (the off switch), has static BAR1 active (no `RMForceStaticBar1=0`), has BAR1 smaller than VRAM, or has
+a non-zero `nv_dynbar1_calib`/`nv_dynbar1_delta`, or when `RMForceP2PType`/`RMPcieP2PType` excludes BAR1 P2P. A
+refused pair gets no peer access (`cudaDeviceCanAccessPeer` 0, copies staged through the host) and rate-limited
+`DynBar1P2P:` error lines in the kernel log naming the card and the reason. Like every consumer P2P patch, on a card
+with the route on (GA102, or opted in) it skips NVIDIA's chipset, topology and host checks. Tested only on X99 /
+Xeon E5 v4, two CPU root ports, no switch, `iommu=pt`.
 
 On top of dingiv's dynamic BAR1 branch, this repository adds:
 
@@ -98,7 +149,7 @@ On top of dingiv's dynamic BAR1 branch, this repository adds:
 - Teardown and lock fixes: peer windows are drained before the UVM device is freed, under the API lock; a duplicated
   handle's window is freed on every path; a failed lock acquisition never unlocks; the OOM path releases its locks.
 - Defaults: no mailbox fallback without a mailbox; the hugepage pin fast path is off (`nv_hugetlb_pin_fast_path`);
-  `NVreg_EnableResizableBar` defaults to 0 as in stock; P2P on by default with the refusals above.
+  `NVreg_EnableResizableBar` defaults to 0 as in stock; P2P on by default on GA102 with the refusals above.
 - GPUs are probed in PCI bus order, as in the proprietary build, so GPU numbering and the console card stay put.
 
 ## Build and install
@@ -109,30 +160,32 @@ make modules -j"$(nproc)"
 (cd kernel-open && sha256sum nvidia*.ko > SHA256SUMS)    # the pins the scripts check
 ```
 
-The scripts are in `contrib/3080-20g/`. In `contrib/3080-20g/config.sh`, set `OUT` (the full path of `kernel-open`)
-and `GPUS`: the card addresses from `lspci -Dnn -d 10de::0300`, separated by spaces inside one pair of quotes, never
-commas, e.g. `GPUS="0000:01:00.0 0000:02:00.0"`. The driver's per-device line uses semicolons instead
-(`pci=<address>;RMForceStaticBar1=0;` per card); geforce-bar1-resize writes it. Each script that changes something
-takes `--dry-run` (print the plan, change nothing) or `--yes`; `p2p-load.sh` and `p2p-install.sh` refuse any `.ko` of
-the build that does not match `SHA256SUMS`. Every program using the GPUs must be stopped first (or set `DRAIN_CMD`
-and `RESTORE_CMD`). If the kernel log shows `RmInitAdapter failed` or `init failed during probe` right after
-`nvidia.ko` is loaded, `p2p-load.sh` unloads it at once, loads nothing else and goes back to stock (if it cannot
-unload it, it stops as below). `p2p-rollback.sh` checks its own load of `nvidia.ko` the same way: if RM init fails
-with that driver too, it unloads it, loads nothing else and stops; a load that fails stops it the same way. Before it
-lets udev run the events it held back, it writes `/run/modprobe.d/zz-p2p-stop-nvidia.conf`, which blocks every
-nvidia module so that no udev rule loads the failing driver again, and then it reports what `lsmod` shows (if nvidia
-could not be unloaded, it says the modules are still loaded: reboot now). The block is in `/run`, so it is gone after
-a reboot, and the next boot loads the same driver (what modprobe resolves; the message names it), which fails the
-same way unless the cause, e.g. missing GSP firmware, is fixed first. To retry without a reboot once it is fixed,
-remove the block by hand: `sudo rm /run/modprobe.d/zz-p2p-stop-nvidia.conf`.
+The scripts are in `contrib/`. In `contrib/config.sh`, set `OUT` (the full path of `kernel-open`) and `GPUS`: the
+card addresses from `lspci -Dnn -d 10de::0300`, separated by spaces inside one pair of quotes, never commas, e.g.
+`GPUS="0000:01:00.0 0000:02:00.0"` (4-digit PCI domains only: cards behind Intel VMD, whose domains look like
+`10000:`, are not supported). `GPUS` lists only GA102 cards or cards of an opt-in chip; the scripts refuse the
+others and say why. The driver's per-device line uses semicolons instead (`pci=<address>;RMForceStaticBar1=0;` per
+card); geforce-bar1-resize writes it (`driver_option=on` for cards it does not enlarge through `0x610`). Each script
+that changes something takes `--dry-run` (print the plan, change nothing) or `--yes`; `p2p-load.sh` and
+`p2p-install.sh` refuse any `.ko` of the build that does not match `SHA256SUMS`. Every program using the GPUs must be
+stopped first (or set `DRAIN_CMD` and `RESTORE_CMD`). If the kernel log shows `RmInitAdapter failed` or `init failed
+during probe` right after `nvidia.ko` is loaded, `p2p-load.sh` unloads it at once, loads nothing else and goes back to
+stock (if it cannot unload it, it stops as below). `p2p-rollback.sh` checks its own load of `nvidia.ko` the same way:
+if RM init fails with that driver too, it unloads it, loads nothing else and stops; a load that fails stops it the
+same way. Before it lets udev run the events it held back, it writes `/run/modprobe.d/zz-p2p-stop-nvidia.conf`, which
+blocks every nvidia module so that no udev rule loads the failing driver again, and then it reports what `lsmod` shows
+(if nvidia could not be unloaded, it says the modules are still loaded: reboot now). The block is in `/run`, so it is
+gone after a reboot, and the next boot loads the same driver (what modprobe resolves; the message names it), which
+fails the same way unless the cause, e.g. missing GSP firmware, is fixed first. To retry without a reboot once it is
+fixed, remove the block by hand: `sudo rm /run/modprobe.d/zz-p2p-stop-nvidia.conf`.
 
 **Load by hand** (nothing installed; a reboot loads what modprobe resolves):
 
 ```sh
-sudo contrib/3080-20g/p2p-load.sh --yes       # from stock or this build: insmods the build with the options below
-sudo contrib/3080-20g/p2p-check.sh            # read-only; exit status = number of FAIL lines
-sudo contrib/3080-20g/p2p-rollback.sh --yes   # stock without a reboot (by path if a boot install exists; it stays)
-sudo contrib/3080-20g/p2p-rollback.sh --yes --to-installed   # reload the boot install instead
+sudo contrib/p2p-load.sh --yes       # from stock or this build: insmods the build with the options below
+sudo contrib/p2p-check.sh            # read-only; exit status = number of FAIL lines
+sudo contrib/p2p-rollback.sh --yes   # stock without a reboot (by path if a boot install exists; it stays)
+sudo contrib/p2p-rollback.sh --yes --to-installed   # reload the boot install instead
 ```
 
 Module options used (the per-card string is the one geforce-bar1-resize writes):
@@ -146,14 +199,15 @@ To turn P2P off, add `RMDynBar1P2PEnable=0;` after each card's `RMForceStaticBar
 in `config.sh`; for the boot install, `[<address>]="keys=RMDynBar1P2PEnable=0;"` per card in the `CARD` list of
 `/etc/geforce-bar1-resize.conf`, or a hand edit of `zz-geforce-bar1-resize.conf`, which geforce-bar1-resize keeps when
 it rewrites the file); never set the global `NVreg_RegistryDwords`. The driver then repeats a rate-limited
-`... (P2P off)` line, as expected. All tests ran with `uvm_disable_hmm=1`.
+`... (P2P off)` line, as expected. `P2P_ENABLE=1` writes `RMDynBar1P2PEnable=1;` instead (the trial load of the
+opt-in). All tests ran with `uvm_disable_hmm=1`.
 
 **Boot install** (verified on one boot on the tested platform):
 
 ```sh
-sudo contrib/3080-20g/p2p-install.sh --yes    # for the running kernel only
+sudo contrib/p2p-install.sh --yes    # for the running kernel only
 sudo reboot
-sudo contrib/3080-20g/p2p-check.sh
+sudo contrib/p2p-check.sh
 ```
 
 The installer copies the modules to `/lib/modules/<kernel>/updates/p2p/`, writes `/etc/depmod.d/p2p.conf` (one
@@ -161,8 +215,132 @@ The installer copies the modules to `/lib/modules/<kernel>/updates/p2p/`, writes
 `/var/backups/p2p-modules/`. Stock modules stay in place; other kernels boot stock. The installer refuses if the
 initramfs holds nvidia.
 
-**Fallback to stock, one command:** `sudo contrib/3080-20g/p2p-fallback.sh --yes`, then reboot (`--live` also swaps
-the running driver). If the P2P kernel does not come up, boot another kernel and run it with `KVER=<P2P kernel>`.
+**Fallback to stock, one command:** `sudo contrib/p2p-fallback.sh --yes`, then reboot (`--live` also swaps the running
+driver). If the P2P kernel does not come up, boot another kernel and run it with `KVER=<P2P kernel>`.
+
+**Old paths:** the scripts were in `contrib/3080-20g/` up to this release. `contrib/3080-20g/p2p-*.sh` still work for
+this one release: each runs the script of the same name in `contrib/` with the settings of
+`contrib/3080-20g/config.sh` (unless `P2P_CONFIG` is set) and prints a note; `contrib/3080-20g/common.sh`, which
+geforce-bar1-resize's tests source, loads `contrib/common.sh` the same way. Move your settings to `contrib/config.sh`;
+the old directory goes in the next release. `P2P_ENABLE=1` used to mean the driver default; in `contrib/config.sh` it
+now writes `RMDynBar1P2PEnable=1` for every card and the checks want it (leave it empty for the default). Read from
+`contrib/3080-20g/config.sh`, 1 keeps its old meaning for this release, with a note.
+
+## Opt-in for other chips
+
+For a pair of Turing, Ampere (not GA102) or Ada cards, or a GA102 card paired with another Ampere chip; steps 1-3 also
+for a GA102 pair that says "on by default, untested" (step 4 then only matters for a card with static BAR1). Have
+geforce-bar1-resize in place (BAR1 at least VRAM), the build and `SHA256SUMS` as above, and the GPUs otherwise idle.
+The trial load of step 2 passes `RMForceStaticBar1=0` itself, so it works before `driver_option=on` is set.
+
+```sh
+contrib/p2p-check.sh --pairs                          # 1. chips and verdicts: the pair should say "untested"
+sudo env P2P_ENABLE=1 contrib/p2p-load.sh --yes       # 2. trial load with RMDynBar1P2PEnable=1 per card; nothing persisted
+sudo contrib/p2p-check.sh --integrity                 # 3. the check plus the integrity test of every pair
+sudo contrib/p2p-enable.sh --yes 0000:01:00.0 0000:02:00.0   # 4. after a PASS: key and driver_option=on from the next boot
+sudo contrib/p2p-install.sh --yes && sudo reboot      # 5. boot install, if not done yet
+sudo contrib/p2p-check.sh                             # 6. the pair says "opted in (on, ...)"
+```
+
+Then please send a compatibility report with the report file of step 3 (also when it failed). A failure in step 3:
+`sudo contrib/p2p-rollback.sh --yes` returns to stock, and nothing was persisted. The gate is per card, not per pair:
+a PASS of card C with card D lets `p2p-enable.sh` enable C, also for use with another card E. Turning a GA102 card
+back on that you turned off through `keys=` (`p2p-enable.sh --yes <card>`) also needs a PASS (or `--skip-integrity`);
+an `RMDynBar1P2PEnable` you added by hand to `zz-geforce-bar1-resize.conf` has to be removed there, by hand.
+
+`p2p-enable.sh` works through geforce-bar1-resize's per-card entry in `/etc/geforce-bar1-resize.conf` (no second
+modprobe.d file): `keys=RMDynBar1P2PEnable=1;` for an opt-in chip (not for GA102, which is on by default), and
+`driver_option=on` for every card that has no `RMForceStaticBar1=0` in what modprobe reads (resize-only cards and cards
+whose firmware BAR1 is already large; geforce-bar1-resize's default `auto` keeps their static BAR1). Then it runs
+`geforce-bar1-resize driver-option --write`, which writes `zz-geforce-bar1-resize.conf`. It writes an address entry
+with `ids=` (so a different card that later sits at that address is not touched), keeps the other settings of the
+entry the card used before, and checks the result with `geforce-bar1-resize driver-option --print` before it writes
+anything (a card outside geforce-bar1-resize's scope stops here). It backs up the config and the option file to
+`/var/backups/geforce-dynbar1-p2p/`, checks both the key and `RMForceStaticBar1=0` in what modprobe reads afterwards,
+and puts both files back if `--write` or that check fails. It refuses a card without a PASS of step 3 recorded for it
+with the nvidia build that boots (the boot install, else the build in `OUT`; a PASS is recorded only when the check
+in step 3 had no FAIL line; `--skip-integrity` enables anyway, at your own risk), a BAR1 smaller than VRAM, and
+Blackwell, datacenter and unknown chips (GeForce Blackwell keeps static BAR1 and NVIDIA's own P2P).
+`p2p-enable.sh --yes --undo <cards>` removes the `RMDynBar1P2PEnable=1` it set (it records those cards in
+`/var/lib/geforce-dynbar1-p2p/enabled`); a key you set yourself, `=0` (P2P off) or `=1`, stays, and `driver_option=on`
+stays (it only keeps all of VRAM host-visible). By hand: add `driver_option=on` and `keys=RMDynBar1P2PEnable=1;` to
+the card's entry in the `CARD` list, then `sudo geforce-bar1-resize driver-option --write`.
+
+The opt-in route is untested on every chip: the integrity test can find a broken route, it cannot prove a working one.
+Two memory-modded cards are the reason the opt-in exists, and neither has been tested with this driver yet; reports are
+wanted, PASS or FAIL:
+
+- RTX 2080 Ti 22GB (TU102): a 32 GiB BAR1, `gsp_tu10x.bin` and `ucodes_tu10x.bin`.
+- RTX 4090 48GB (AD102): a 64 GiB BAR1, `gsp_ga10x.bin` and `ucodes_ga10x.bin`.
+
+Both need a BAR1 at least as large as VRAM (geforce-bar1-resize can set it; its route on TU102 and AD102 is
+untested), `RMForceStaticBar1=0` for the card (with a BAR1 that large the driver otherwise turns static BAR1 on, and
+the verdict says `static BAR1 on <card>`), the GSP firmware above from the 615.71.09 userspace, and
+`RMDynBar1P2PEnable=1`, which `p2p-enable.sh` sets after an integrity PASS (steps 2-4).
+
+For the RTX 4090 48GB, Duanyll's notes in [`docs/48g-4090-p2p/`](docs/48g-4090-p2p/) record their own runs of the
+per-allocation dynamic BAR1 route this driver builds on ("Method 3"): their 595.71.05 build on 8 cards with a 32 GB
+BAR1 each, with checked peer copies at 22.7 GB/s and NCCL `all_reduce` at 20.4 GB/s
+([`method3-test-results.md`](docs/48g-4090-p2p/method3-test-results.md), raw logs in
+[`hw-logs-2026-07/`](docs/48g-4090-p2p/hw-logs-2026-07/)). Their 615.71.09 port was only compiled, not run
+([`615-port.md`](docs/48g-4090-p2p/615-port.md)). These are their results, not this driver's: this driver refuses a
+BAR1 smaller than VRAM, so it gives that 32 GB setup no P2P and needs the 64 GiB BAR1.
+
+## Integrity test
+
+`sudo contrib/p2p-check.sh --integrity [--max-mib N]` runs the read-only check, then for each pair in `GPUS` the
+CUDA program `contrib/integrity/p2p-integrity` (built from `p2p-integrity.cu` by `contrib/integrity/build.sh` on first
+use; `nvcc` from `NVCC`, `PATH` or `/usr/local/cuda*`):
+
+- Peer access must be offered both ways (`cudaDeviceCanAccessPeer` and the P2P access attribute) and enabled;
+  otherwise the driver would stage copies through host memory and nothing is tested (`NO_P2P`; for an untested pair,
+  do the trial load first).
+- Each GPU first checks its own fill and compare kernels against the host.
+- For `cudaMalloc` and `cuMemCreate`/`cuMemMap` memory, sizes from 4 KiB through the 2 MiB window edges, 64 MiB and
+  256 MiB to 1, 2 and 4 GiB (`--max-mib`, default 4096), each size twice (the whole buffer, and a range whose ends are
+  not 2 MiB aligned (8-byte granular), with guard bands below and above it), six patterns (random, zeros, ones,
+  0x55/0xAA, address, walking one), and both directions, four transfers each: *push* (peer copy on the source GPU, a
+  peer write), *pull* (peer copy on the destination GPU, a peer read), *store* (a kernel writes the peer's buffer
+  through the peer pointer)
+  and *load* (a kernel reads and compares the peer's buffer). The destination starts as the complement of the
+  pattern; afterwards every 64-bit word is compared on its GPU (the guard bands must be unchanged), plus 4 KiB at
+  each end and edge on the host. A canary buffer on each GPU catches stray writes outside the tested buffers.
+- Then the copy bandwidth: 256 MiB x 20 in each direction and both ways at once, with the copied data checked.
+- FAIL also when no case ran, or a size up to 1 GiB was skipped for lack of free memory (stop other GPU programs).
+- The test sees only the two cards of the pair (`CUDA_VISIBLE_DEVICES` set to their UUIDs, which are not printed).
+  The pair FAILs on new kernel-log lines during the test: Xid and `DynBar1P2P:` lines that name one of its two cards
+  (other GPUs in the machine do not count), and any AER, DMAR or `RmInitAdapter` line; and on a change of
+  `nvidia_uvm.uvm_bar1_gate_trips` or `nvidia.nv_dynbar1_rm_p2p_refused`.
+- Time limits: each transfer and compare 120 s + `--max-mib`/64 s, the whole pair 1200 s + `--max-mib`/2 s (override
+  with `INTEGRITY_OP_TIMEOUT` and `INTEGRITY_TIMEOUT`). A hung peer transfer ends in `FAIL integrity A <-> B: timed
+  out` and the last kernel-log lines, not in a hang, and no further pair is tested in that run (reboot first).
+  A hang inside the kernel driver itself (the test process stuck in the kernel, state `D` in `ps`) cannot be timed
+  out: then neither the test's own limit (exit 4) nor the outer `timeout` can end it, `--integrity` hangs too, and only
+  a reboot frees the GPUs. Run the test with nothing else on the GPUs and a way to reboot the machine.
+
+Output: `PASS integrity A <-> B (max-mib N, C cases)` or `FAIL ...` per pair. The default run is 264 cases (2112
+transfers, about 1.4 TiB moved) and allocates up to `--max-mib` on each card. On the two cards of Tested on it took
+about 3.7 minutes (219 s, 1403.6 GiB copied; bandwidth 10.27 GB/s each way, 19.4 GB/s both ways), well inside the
+default limits above, which leave room for slower links and chips. With `RMDynBar1P2PEnable=0` for the cards (P2P off)
+the test reports `NO_P2P` and copies nothing.
+The whole output, with a short system summary (kernel, IOMMU options, CPU, board, PCIe paths and links, nvidia-smi
+topology; no serial numbers or GPU UUIDs), goes to `/var/lib/geforce-dynbar1-p2p/reports/<time>/report.txt`: attach
+that file to the compatibility report. Check it for paths and names before posting. Each PASS is recorded in
+`/var/lib/geforce-dynbar1-p2p/integrity-pass` with the size and the number of cases; `p2p-enable.sh` accepts only a
+PASS of the full default run (`--max-mib` 4096 or more, 264 cases or more). That number is absolute: a card whose
+free memory cannot hold the 4 GiB size (6 GB cards, or a card in use) skips it and stays below 264 cases, so it can
+be enabled only with `--skip-integrity`, after a PASS at the sizes it can hold.
+
+## Tests
+
+`tests/contrib/run.sh` (as a normal user) runs the scripts against a fake sysfs tree, a fake `/lib/firmware` and
+stand-ins for nvidia-smi, modprobe, insmod, rmmod, modinfo, dmesg and geforce-bar1-resize: chip table (against
+`pci.ids` when one is found, `PCI_IDS=`), pair verdicts, the `card_ok` texts geforce-bar1-resize's own tests rely on,
+`p2p-check.sh` (`--pairs`, the check, `--integrity` with a stand-in test binary), `p2p-enable.sh`, the `p2p-load.sh`
+plan, the GSP firmware check of `p2p-load.sh` and `p2p-install.sh`, a load whose RM init fails and a normal load, the
+old entry points, the build script, and shellcheck. With `nvcc` present it also compiles `p2p-integrity.cu` and runs
+its host-only `--selftest`.
+Nothing in it needs a GPU.
 
 ## NCCL and vLLM settings
 
@@ -179,7 +357,8 @@ the running driver). If the P2P kernel does not come up, boot another kernel and
 
 ## Not tested
 
-- Other cards, boards, CPUs, PCIe switches, mixed pairs, more than two GPUs, driver versions, kernels; Windows.
+- Every card but the RTX 3080 20GB (other GA102 cards on by default, other chips opt-in), other boards, CPUs, PCIe
+  switches, mixed-chip pairs, more than two GPUs, driver versions, kernels; Windows.
 - GPU or root-port reset while peer windows are open; soaks longer than those above; more than one boot.
 
 ## Credits

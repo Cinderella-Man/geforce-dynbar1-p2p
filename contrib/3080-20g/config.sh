@@ -13,7 +13,10 @@ KVER=${KVER:-$(uname -r)}
 VER=${VER:-615.71.09}
 
 # P2P switch (registry key RMDynBar1P2PEnable, read per card; no global NVreg_RegistryDwords is ever written).
-#   "" or 1  driver default: on for a pair of GA102 cards that passes the driver's checks
+# This file belongs to the old entry points in contrib/3080-20g/, kept for one release; move to contrib/config.sh.
+#   "" or 1  driver default here: on for a pair of GA102 cards that passes the driver's checks. (In contrib/config.sh
+#            1 now means RMDynBar1P2PEnable=1 for every card, the trial load of the opt-in; with this file the
+#            scripts treat 1 as the default and say so.)
 #   0        off: RMDynBar1P2PEnable=0 after each card's RMForceStaticBar1=0 in the per-device line. For the boot
 #            install, set keys=RMDynBar1P2PEnable=0; per card in /etc/geforce-bar1-resize.conf (or add it to its
 #            zz-geforce-bar1-resize.conf, which it keeps; zz-nvidia-static-bar1.conf on a 3080-20gb-rebar install).
