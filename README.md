@@ -1,7 +1,7 @@
-# geforce-dynbar1-p2p: GPU peer-to-peer for memory-modded RTX 3080 20GB cards
+# geforce-dynbar1-p2p: GPU peer-to-peer for memory-modded GeForce GPUs
 
-NVIDIA's open GPU kernel modules 615.71.09 with a patch series that lets two memory-modded RTX 3080 20GB cards copy
-directly into each other's memory over PCIe (peer-to-peer, P2P). The stock driver reports no peer access for these
+NVIDIA's open GPU kernel modules 615.71.09 with a patch series that lets two memory-modded GeForce GPUs copy directly
+into each other's memory over PCIe (peer-to-peer, P2P). The stock driver reports no peer access for most GeForce
 cards, so CUDA, NCCL and vLLM stage every GPU-to-GPU copy through host memory; with these modules the copies go card to
 card. It builds on the P2P patches of tinygrad, aikitoria, Duanyll and dingiv (Credits).
 
@@ -73,10 +73,10 @@ decode +5-7 %. TTFT, 2-stream rows and setup: [results/hyperqwen-long-context.md
 ## How it works
 
 The tinygrad-style patches use a *static* BAR1: the whole of VRAM is mapped into BAR1 up front, and peers write
-through that mapping. On these cards static BAR1 counts host-visible memory twice and leaves only about half of the
-20 GB host-visible (see geforce-bar1-resize). This series uses *dynamic* BAR1 instead: each allocation a peer accesses
-gets its own window in the owner's 32 GiB BAR1 when it is mapped, and the window is removed when it is unmapped.
-Nothing maps all of VRAM, so with `RMForceStaticBar1=0` the full 20 GB stays host-visible.
+through that mapping. Static BAR1 counts host-visible memory twice and leaves only about half of VRAM host-visible
+(measured on the RTX 3080 20GB: about 10 of 20 GB; see geforce-bar1-resize). This series uses *dynamic* BAR1 instead:
+each allocation a peer accesses gets its own window in the owner's BAR1 when it is mapped, and the window is removed
+when it is unmapped. Nothing maps all of VRAM, so with `RMForceStaticBar1=0` all of VRAM stays host-visible.
 
 P2P is on by default for pairs of GA102 GPUs (detected by chip family). Other chips use the route only with
 `RMDynBar1P2PEnable=1`; pairs with no such GPU, and static-BAR1 pairs that stock NVIDIA supports, behave as stock.
