@@ -9,10 +9,20 @@ labels: compatibility
 
 ## Integrity test
 
-Attach `/var/lib/geforce-dynbar1-p2p/reports/<time>/report.txt` from `sudo contrib/p2p-check.sh --integrity` (README,
-Integrity test), or paste it below. Please send it also when it failed. For an opt-in chip, run it on the trial load
-(`sudo env P2P_ENABLE=1 contrib/p2p-load.sh --yes`, README, Opt-in for other chips); a GA102 card other than the RTX
-3080 20GB has P2P on by default and is tested as loaded.
+Attach `/var/lib/geforce-dynbar1-p2p/reports/<time>/report.txt` from the integrity test (README, Integrity test), or
+paste it below. Please send it also when it failed.
+
+```
+sudo contrib/p2p-check.sh --integrity
+```
+
+For an opt-in chip, do the trial load first, then run the test above (README, Opt-in for other chips):
+
+```
+sudo env P2P_ENABLE=1 contrib/p2p-load.sh --yes
+```
+
+A GA102 card other than the RTX 3080 20GB has P2P on by default and is tested as loaded.
 
 ```
 paste report.txt here if you do not attach it
@@ -55,6 +65,7 @@ paste the full output of: sudo contrib/p2p-check.sh   (after a reboot with the b
 ```
 
 Optional:
+
 - `p2pBandwidthLatencyTest` or nvbandwidth numbers:
 - NCCL test numbers (nccl-tests, with `NCCL_P2P_LEVEL`):
 - Workload results with P2P on and off, same settings (engine, model, tensor parallel size, prompt length):

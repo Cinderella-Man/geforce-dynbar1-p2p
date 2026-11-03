@@ -1,7 +1,8 @@
 # vLLM tensor parallel 2 (HyperQwen): long context with P2P off and on
 
-Two memory-modded RTX 3080 20GB on the platform in the main README, with the modules of this repository. All three
-configurations use the same modules: P2P on is the driver default; P2P off is the per-card opt-out
+Two memory-modded RTX 3080 20GB on the platform in the main README, with the modules of this repository.
+
+All three configurations use the same modules. P2P on is the driver default; P2P off is the per-card opt-out
 (`RMDynBar1P2PEnable=0` in the per-device string), which leaves CUDA without peer access.
 
 ## Setup
@@ -9,18 +10,25 @@ configurations use the same modules: P2P on is the driver default; P2P off is th
 - [HyperQwen](https://github.com/syv-ai/HyperQwen) upstream commit `ce9615c`: vLLM 0.31.0, NCCL 2.29.7, `PTH_FA=1`
   (pth_fa attention backend), MTP speculative decoding with 3 speculative tokens per step.
 - Model Qwen3.8-27B-W4A16-AutoRound, tensor parallel 2, maximum length 262144.
-- Configurations:
-  - **base**: P2P off; `NCCL_P2P_DISABLE=1` and `--disable-custom-all-reduce`, so all-reduce goes through shared host
-    memory (NCCL `via SHM`).
-  - **nccl**: P2P on; `NCCL_P2P_DISABLE=0`, `NCCL_P2P_LEVEL=SYS` (NCCL `via P2P/CUMEM`), custom all-reduce off.
-  - **car**: as nccl, plus vLLM's custom all-reduce.
 - Prompts of 8k, 32k and 128k tokens, 1 stream and 2 concurrent streams, 256 output tokens, unique prompts (no prefix
   cache hits). Each cell ran 3 times; the tables show the median of the 3 runs.
 - Every cell finished; the kernel log had no Xid, AER or DMAR line in any configuration.
 
+The three configurations:
+
+| Configuration | P2P | Settings |
+|---|---|---|
+| base | off | `NCCL_P2P_DISABLE=1` and `--disable-custom-all-reduce`, so all-reduce goes through shared host memory (NCCL `via SHM`) |
+| nccl | on | `NCCL_P2P_DISABLE=0`, `NCCL_P2P_LEVEL=SYS` (NCCL `via P2P/CUMEM`), custom all-reduce off |
+| car | on | as nccl, plus vLLM's custom all-reduce |
+
 ## 1 stream
 
-TTFT in seconds; prefill = prompt tokens / TTFT; decode = output tokens per second after the first token.
+Units and definitions:
+
+- TTFT in seconds;
+- prefill = prompt tokens / TTFT;
+- decode = output tokens per second after the first token.
 
 | Prompt | base: TTFT s / prefill / decode | nccl | car | nccl/base | car/base |
 |---|---|---|---|---|---|
@@ -37,6 +45,7 @@ TTFT in seconds; prefill = prompt tokens / TTFT; decode = output tokens per seco
 | 128k | 179.4 / 1462 / 29.0 / 2.8 | 168.5 / 1555 / 30.8 / 3.0 | 168.6 / 1555 / 30.5 / 3.0 | 0.94 / 1.06 / 1.06 / 1.07 | 0.94 / 1.06 / 1.05 / 1.07 |
 
 How to read the 2-stream rows:
+
 - TTFT is the time until both streams have their first token; prefill = all prompt tokens / that time.
 - Decode = all output tokens / the time during which at least one stream was generating.
 - End-to-end = all output tokens / cell wall time, prefill included. With long prompts most of the wall time is
