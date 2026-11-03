@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: MIT
 # Stand-in tests of the scripts in contrib/: chip detection, pair verdicts, card_ok (the contract geforce-bar1-resize's
 # tests rely on), the old contrib/3080-20g/ entry points, p2p-check.sh (--pairs, the check, --integrity), p2p-enable.sh,
-# the p2p-load.sh plan, its GSP firmware gate and its stop after an RM init failure, p2p-install.sh's firmware gate and
-# the integrity build script, against a fake /sys tree, a fake /lib/firmware, a fake nvidia-smi, modprobe -c, modinfo,
-# dmesg and geforce-bar1-resize. No GPU, driver or real system file is touched; nothing is written outside $WORK.
+# the p2p-load.sh plan, its GSP firmware gate, its stop after an RM init failure and its handover to p2p-rollback.sh
+# with udev paused, p2p-install.sh's firmware gate and the integrity build script, against a fake /sys tree, a fake
+# /lib/firmware, a fake nvidia-smi, modprobe -c, modinfo, dmesg and geforce-bar1-resize. No GPU, driver or real system
+# file is touched; nothing is written outside $WORK.
 #
 # Usage, from the repository root, as a normal user:  tests/contrib/run.sh [CASE-PREFIX...]
 # Needs bash, coreutils, sed, awk, diff. Optional: shellcheck (case 90), nvcc (case 91 compiles p2p-integrity.cu and
@@ -16,10 +17,10 @@
 #
 # How the scripts see the fake tree: they run as copies in $WORK/src in which only these paths are rewritten to
 # $WORK/fake/...: /sys/, /proc/driver/nvidia/, /proc/cmdline, /lib/modules/, /lib/firmware, /var/lib/geforce-dynbar1-p2p,
-# /var/backups/, /etc/geforce-bar1-resize.conf and /usr/local/cuda (checked by reversing it). $WORK/bin comes first in
-# PATH: `id -u` prints 0, nvidia-smi, modprobe, modinfo, dmesg, lspci, udevadm, rmmod, insmod and geforce-bar1-resize
-# are stand-ins. insmod, rmmod and modprobe (loading) keep /sys/module up to date; a module's insmod appends
-# $FAKE/klog-<module> (if there is one) to the kernel log.
+# /var/backups/, /etc/geforce-bar1-resize.conf, /run/modprobe.d and /usr/local/cuda (checked by reversing it). $WORK/bin
+# comes first in PATH: `id -u` prints 0, nvidia-smi, modprobe, modinfo, dmesg, lspci, lsmod, udevadm, rmmod, insmod and
+# geforce-bar1-resize are stand-ins. insmod, rmmod and modprobe (loading) keep /sys/module up to date; a module's insmod
+# appends $FAKE/klog-<module> (if there is one) to the kernel log; udevadm calls go to $FAKE/udev.
 set -u
 export LC_ALL=C
 
@@ -41,7 +42,7 @@ FAKE=$WORK/fake SRC=$WORK/src BIN=$WORK/bin
 export FAKE GBR_CONF=$FAKE/etc/geforce-bar1-resize.conf
 
 # --- copies with only the system paths substituted ---------------------------------------------------------------------
-PATHS=(/sys/ /proc/driver/nvidia/ /proc/cmdline /lib/modules/ /lib/firmware /var/lib/geforce-dynbar1-p2p /var/backups/ /etc/geforce-bar1-resize.conf /usr/local/cuda)
+PATHS=(/sys/ /proc/driver/nvidia/ /proc/cmdline /lib/modules/ /lib/firmware /var/lib/geforce-dynbar1-p2p /var/backups/ /etc/geforce-bar1-resize.conf /run/modprobe.d /usr/local/cuda)
 subst() { local a=() p; for p in "${PATHS[@]}"; do a+=(-e "s|$p|$FAKE$p|g"); done; sed "${a[@]}" "$1"; }
 unsubst() { local a=() p; for p in "${PATHS[@]}"; do a+=(-e "s|$FAKE$p|$p|g"); done; sed "${a[@]}" "$1"; }
 mkdir -p "$SRC"
@@ -58,7 +59,8 @@ stub() { printf '#!/bin/bash\n%s\n' "$2" >"$BIN/$1" && chmod 755 "$BIN/$1"; }
 stub id "[ \"\${1:-}\" = -u ] && { echo 0; exit 0; }; exec $REAL_ID \"\$@\""
 stub uname "[ \"\$*\" = -r ] && { echo stand-in; exit 0; }; exec $REAL_UNAME \"\$@\""
 stub dmesg 'cat "$FAKE/dmesg" 2>/dev/null; exit 0'
-stub udevadm 'exit 0'
+stub udevadm 'echo "udevadm $*" >>"$FAKE/udev"'
+stub lsmod 'echo "Module Size Used by"; for d in "$FAKE"/sys/module/*/; do [ -d "$d" ] && echo "$(basename "$d") 1 0"; done; exit 0'
 # modload MODULE SRCVERSION: the module is loaded (/sys/module/<name> with the parameters p2p-load.sh checks); its
 # kernel-log lines in $FAKE/klog-<name>, if any, go to the log
 cat >"$BIN/modload" <<'EOF'
@@ -151,10 +153,13 @@ export PATH=$BIN:$REAL_PATH GBR_OPT_FILE=$FAKE/modprobe-c
 # --- fake system ---------------------------------------------------------------------------------------------------
 reset_fake() {
   rm -rf "$FAKE"; mkdir -p "$FAKE/sys/bus/pci/devices" "$FAKE/sys/module" "$FAKE/smi" "$FAKE/proc/driver/nvidia" "$FAKE/etc"
-  : >"$FAKE/dmesg"; : >"$FAKE/modprobe-c"; : >"$FAKE/calls"; : >"$FAKE/gbr-cards"; : >"$FAKE/proc/cmdline"
+  : >"$FAKE/dmesg"; : >"$FAKE/modprobe-c"; : >"$FAKE/calls"; : >"$FAKE/gbr-cards"; : >"$FAKE/proc/cmdline"; : >"$FAKE/udev"
   fw "$FAKE/lib/firmware" gsp_ga10x.bin ucodes_ga10x.bin gsp_tu10x.bin ucodes_tu10x.bin
   printf '%s\n' "| 0    X     OK" >"$FAKE/smi/topo"
 }
+# the udevadm calls so far, |-separated; the file stop_blocked writes to block every nvidia module
+udev_calls() { tr '\n' '|' <"$FAKE/udev"; }
+STOP=$FAKE/run/modprobe.d/zz-p2p-stop-nvidia.conf
 # fw DIR FILE...: GSP firmware files of 615.71.09 under DIR/nvidia/615.71.09/
 fw() { local d=$1/nvidia/615.71.09 f; shift; mkdir -p "$d"; for f in "$@"; do echo fw >"$d/$f"; done; }
 # card ADDRESS DEVICE [ARCH] [VRAM_MIB] [BAR1_MIB] [CLASS] [SUBSYSTEM]: an NVIDIA function; ARCH "-" = not in nvidia-smi.
@@ -864,6 +869,8 @@ c20() {
     "rmmod nvidia_drm|rmmod nvidia_modeset|rmmod nvidia_uvm|rmmod nvidia|insmod $WORK/out/nvidia.ko|rmmod nvidia|modprobe -v nvidia|modprobe -a nvidia_drm nvidia_uvm|"
   check "  back to stock through p2p-rollback.sh" out_has "^target: stock .*/nvidia.ko, by modprobe\$"
   check "  the stock driver runs" eq "$(cat "$FAKE/sys/module/nvidia/srcversion")" STOCK-nvidia
+  check "  udev paused by the load, again by the rollback, resumed once; nothing blocked" eq "$(udev_calls)/$(test -e "$STOP" && echo blocked)" \
+    "udevadm control --stop-exec-queue|udevadm control --stop-exec-queue|udevadm control --start-exec-queue|udevadm settle -t 30|/"
   reset_fake; card $A 2206; card $B 2206; stock_loaded "$PD2"
   echo "[  100.000000] NVRM: GPU $B init failed during probe (ret=-5)." >"$FAKE/klog-nvidia"
   sh_ p2p-load.sh --yes
@@ -908,6 +915,54 @@ c22() {
 AD102 2684 Ada_Lovelace 49152 65536 ga10x"
 }
 run_case 22-modded-tu102-ad102 "RTX 2080 Ti 22GB (TU102) and RTX 4090 48GB (AD102) pairs: opt-in, key, static BAR1, BAR1 < VRAM" c22
+
+# the per-device string without RMForceStaticBar1=0, which p2p-rollback.sh refuses to load a driver with
+PD_NOSTATIC="pci=$A;pci=$B;"
+c23() {
+  # p2p-load.sh hands over to p2p-rollback.sh with udev paused; the rollback refuses before its own pause while no
+  # nvidia module is loaded: every nvidia module blocked, then udev resumed and the console bound again
+  card $A 2206; card $B 2206; stock_loaded "$PD2"; cfg "$A $B" ""; echo "VTCON=$CDIR/vtcon" >>"$CDIR/config.sh"
+  modprobe_line "$PD_NOSTATIC"
+  echo "[  100.000000] NVRM: GPU $A init failed during probe (ret=-5)." >"$FAKE/klog-nvidia"
+  sh_ p2p-load.sh --yes
+  check "handover, nvidia unloaded, the rollback refuses: the refusal" out_has "^ABORT: restore the RMForceStaticBar1=0 option before loading a driver\$"
+  check "  then the stop, nothing loaded" out_has "^ABORT: the rollback stopped before loading a driver; no nvidia driver is loaded\.\$"
+  check "  lsmod after udev resumed: no nvidia module" out_has "^  no nvidia module\$"
+  check "  status 1" eq "$RC" 1
+  check "  udev resumed after the pause" eq "$(udev_calls)" "udevadm control --stop-exec-queue|udevadm control --start-exec-queue|udevadm settle -t 30|"
+  check "  console bound again" eq "$(cat "$CDIR/vtcon")" 1
+  check "  every nvidia module blocked" eq "$(grep -c '^install nvidia[-_a-z]* /bin/false$' "$STOP" 2>/dev/null)" 9
+  check "  nothing loaded after rmmod nvidia" eq "$(sed 's/ NVreg.*//' "$FAKE/calls" | tr '\n' '|')" \
+    "rmmod nvidia_drm|rmmod nvidia_modeset|rmmod nvidia_uvm|rmmod nvidia|insmod $WORK/out/nvidia.ko|rmmod nvidia|"
+  # the same refusal without a handover: udev never paused, nothing blocked
+  reset_fake; card $A 2206; card $B 2206; stock_loaded "$PD2"; modprobe_line "$PD_NOSTATIC"
+  sh_ p2p-rollback.sh --yes
+  check "rollback alone refuses the same way" eq "$RC/$(grep -c '^ABORT' "$CDIR/out")" "1/1"
+  check "  udev untouched, nothing blocked" eq "$(udev_calls)/$(test -e "$STOP" && echo blocked)" "/"
+  # a rollback alone from the build: paused once, resumed once, nothing blocked
+  reset_fake; card $A 2206; card $B 2206; stock_loaded "$PD2"; params "$PD2"
+  sh_ p2p-rollback.sh --yes
+  check "rollback alone from the build: stock loaded" eq "$RC/$(cat "$FAKE/sys/module/nvidia/srcversion")" "0/STOCK-nvidia"
+  check "  udev paused and resumed once, nothing blocked" eq "$(udev_calls)/$(test -e "$STOP" && echo blocked)" \
+    "udevadm control --stop-exec-queue|udevadm control --start-exec-queue|udevadm settle -t 30|/"
+}
+run_case 23-handover-unloaded "p2p-load.sh -> p2p-rollback.sh: a refusal with no nvidia loaded blocks nvidia, resumes udev" c23
+
+c24() {
+  # a check of the build fails (all four modules loaded), so p2p-load.sh hands over; the rollback refuses before its
+  # own pause: udev resumed, nothing blocked, the build left loaded
+  card $A 2206; card $B 2206; stock_loaded "$PD2"; cfg "$A $B" ""; echo "VTCON=$CDIR/vtcon" >>"$CDIR/config.sh"
+  modprobe_line "$PD_NOSTATIC"
+  sed -i 's/^EnableResizableBar: 0$/EnableResizableBar: 1/' "$FAKE/proc/driver/nvidia/params"
+  sh_ p2p-load.sh --yes
+  check "failed check, handover, the rollback refuses" eq "$(grep -c '^CHECK FAILED EnableResizableBar' "$CDIR/out")/$(grep -c '^ABORT: restore the RMForceStaticBar1=0' "$CDIR/out")" "1/1"
+  check "  no stop of its own, status 1" eq "$(grep -c '^ABORT: the rollback stopped' "$CDIR/out")/$RC" "0/1"
+  check "  udev resumed after the pause, console bound again" eq "$(udev_calls)$(cat "$CDIR/vtcon")" \
+    "udevadm control --stop-exec-queue|udevadm control --start-exec-queue|udevadm settle -t 30|1"
+  check "  nothing blocked" test ! -e "$STOP"
+  check "  the build stays loaded" eq "$(cat "$FAKE/sys/module/nvidia/srcversion")/$(cat "$FAKE/sys/module/nvidia_uvm/srcversion")" "SRC-nvidia/SRC-nvidia_uvm"
+}
+run_case 24-handover-loaded "p2p-load.sh -> p2p-rollback.sh: a refusal with nvidia loaded resumes udev, blocks nothing" c24
 
 c10() {
   card $A 2206; card $B 2206; card $C 2206

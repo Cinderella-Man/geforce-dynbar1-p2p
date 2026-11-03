@@ -172,12 +172,14 @@ stopped first (or set `DRAIN_CMD` and `RESTORE_CMD`). If the kernel log shows `R
 during probe` right after `nvidia.ko` is loaded, `p2p-load.sh` unloads it at once, loads nothing else and goes back to
 stock (if it cannot unload it, it stops as below). `p2p-rollback.sh` checks its own load of `nvidia.ko` the same way:
 if RM init fails with that driver too, it unloads it, loads nothing else and stops; a load that fails stops it the
-same way. Before it lets udev run the events it held back, it writes `/run/modprobe.d/zz-p2p-stop-nvidia.conf`, which
-blocks every nvidia module so that no udev rule loads the failing driver again, and then it reports what `lsmod` shows
-(if nvidia could not be unloaded, it says the modules are still loaded: reboot now). The block is in `/run`, so it is
-gone after a reboot, and the next boot loads the same driver (what modprobe resolves; the message names it), which
-fails the same way unless the cause, e.g. missing GSP firmware, is fixed first. To retry without a reboot once it is
-fixed, remove the block by hand: `sudo rm /run/modprobe.d/zz-p2p-stop-nvidia.conf`.
+same way, and so does a refusal before it loads anything after `p2p-load.sh` handed over with no nvidia module loaded
+(with one loaded, it resumes udev and leaves the modules as they are). Before it lets udev run the events it held
+back, it writes `/run/modprobe.d/zz-p2p-stop-nvidia.conf`, which blocks every nvidia module so that no udev rule
+loads the failing driver again, and then it reports what `lsmod` shows (if nvidia could not be unloaded, it says the
+modules are still loaded: reboot now). The block is in `/run`, so it is gone after a reboot, and the next boot loads
+the same driver (what modprobe resolves; the message names it), which fails the same way unless the cause, e.g.
+missing GSP firmware, is fixed first. To retry without a reboot once it is fixed, remove the block by hand:
+`sudo rm /run/modprobe.d/zz-p2p-stop-nvidia.conf`.
 
 **Load by hand** (nothing installed; a reboot loads what modprobe resolves):
 

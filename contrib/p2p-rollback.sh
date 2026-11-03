@@ -9,6 +9,16 @@ set -u
 # shellcheck source=common.sh
 . "$(dirname "$(readlink -f "$0")")/common.sh"
 parse_args "--to-installed" "$@"
+# p2p-load.sh hands over after a failed load with udev still paused (P2P_UDEV_PAUSED=1). If this script stops before
+# its own pause (a refusal below), resume udev on the way out; with no nvidia module loaded, first block every nvidia
+# module, as stop_blocked does, because the held events could load the driver that just failed.
+handover_exit() {
+  local rc=$?
+  trap - EXIT
+  if loaded nvidia; then unpause; exit "$rc"; fi
+  stop_blocked "the rollback stopped before loading a driver" "$(modinfo -k "$KVER" -F filename nvidia 2>/dev/null)"
+}
+if [ "${P2P_UDEV_PAUSED:-}" = 1 ]; then unset P2P_UDEV_PAUSED; trap handover_exit EXIT; fi
 
 echo "== preflight (read-only)"
 preflight_common

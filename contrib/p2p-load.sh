@@ -69,7 +69,8 @@ fi
 if [ $ok = 0 ]; then
   echo "LOAD OR CHECK FAILED; dmesg tail:"; dmesg | tail -30
   [ "$DRY" = 1 ] && exit 1
-  trap - EXIT; exec "$HERE/p2p-rollback.sh" --yes
+  # udev is still paused: the rollback resumes it, also when it stops before its own swap
+  trap - EXIT; P2P_UDEV_PAUSED=1 exec "$HERE/p2p-rollback.sh" --yes
 fi
 unpause
 
