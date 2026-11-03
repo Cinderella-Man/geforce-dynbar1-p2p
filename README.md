@@ -1,9 +1,12 @@
-# 3080-20g-p2p: GPU peer-to-peer for memory-modded RTX 3080 20GB cards
+# geforce-dynbar1-p2p: GPU peer-to-peer for memory-modded RTX 3080 20GB cards
 
 NVIDIA's open GPU kernel modules 615.71.09 with a patch series that lets two memory-modded RTX 3080 20GB cards copy
 directly into each other's memory over PCIe (peer-to-peer, P2P). The stock driver reports no peer access for these
 cards, so CUDA, NCCL and vLLM stage every GPU-to-GPU copy through host memory; with these modules the copies go card to
 card. It builds on the P2P patches of tinygrad, aikitoria, Duanyll and dingiv (Credits).
+
+Formerly `3080-20g-p2p`; GitHub redirects the old links. Verified only on a pair of memory-modded RTX 3080 20GB cards
+(see Tested on).
 
 ## Disclaimer
 
@@ -20,14 +23,22 @@ patch: it can hang the machine or corrupt memory.
 - Linux kernel 7.0.14 (Proxmox), NVIDIA driver userspace 615.71.09
 
 Other GA102 cards (RTX 3080, 3080 Ti, 3090, GA102 A-series) take the same code path but are untested.
-Tried it on other cards or another platform? Please file a
-[compatibility report](https://github.com/noon-at-cgn/3080-20g-p2p/issues/new?template=compatibility-report.md).
+If you tried it on other cards or another platform, please file a
+[compatibility report](https://github.com/noon-at-cgn/geforce-dynbar1-p2p/issues/new?template=compatibility-report.md).
 
 ## Requirements
 
-- The 32 GiB BAR1 from [3080-20gb-rebar](https://github.com/noon-at-cgn/3080-20gb-rebar), with `RMForceStaticBar1=0`
-  set for each card (its `zz-nvidia-static-bar1.conf`). The NVIDIA driver must load from the root file system.
+- The 32 GiB BAR1 from [geforce-bar1-resize](https://github.com/noon-at-cgn/geforce-bar1-resize), with
+  `RMForceStaticBar1=0` set for each card (its `zz-geforce-bar1-resize.conf`). The NVIDIA driver must load from the
+  root file system. By default geforce-bar1-resize sets `RMForceStaticBar1=0` only for cards it enlarges through
+  `0x610`, so a card that already lists its size (e.g. a stock-ReBAR RTX 3090) keeps static BAR1 and gets no P2P: set
+  `driver_option=on` for that card (or `DRIVER_OPTION=on`) in `/etc/geforce-bar1-resize.conf`, run
+  `sudo geforce-bar1-resize driver-option --write`, then reboot.
 - NVIDIA userspace (libcuda, nvidia-smi) of exactly 615.71.09, and a stock 615.71.09 kernel module for the fallback.
+- The GSP firmware of 615.71.09 (`gsp_ga10x.bin` and `ucodes_ga10x.bin` in `/lib/firmware/nvidia/615.71.09/`, or
+  below another directory the kernel's firmware loader searches, also `.xz` or `.zst`; the `firmware/` directory of
+  NVIDIA's `.run`, which its installer copies there). Without it RM init fails on every GPU; `p2p-load.sh` and
+  `p2p-install.sh` refuse before changing anything.
 - Kernel headers for the running kernel, `make` and the compiler the kernel was built with.
 - IOMMU off, or in passthrough mode (`iommu=pt`).
 - Secure Boot off, or the modules signed with a key the machine trusts.
@@ -63,7 +74,7 @@ decode +5-7 %. TTFT, 2-stream rows and setup: [results/hyperqwen-long-context.md
 
 The tinygrad-style patches use a *static* BAR1: the whole of VRAM is mapped into BAR1 up front, and peers write
 through that mapping. On these cards static BAR1 counts host-visible memory twice and leaves only about half of the
-20 GB host-visible (see 3080-20gb-rebar). This series uses *dynamic* BAR1 instead: each allocation a peer accesses
+20 GB host-visible (see geforce-bar1-resize). This series uses *dynamic* BAR1 instead: each allocation a peer accesses
 gets its own window in the owner's 32 GiB BAR1 when it is mapped, and the window is removed when it is unmapped.
 Nothing maps all of VRAM, so with `RMForceStaticBar1=0` the full 20 GB stays host-visible.
 
@@ -93,7 +104,7 @@ On top of dingiv's dynamic BAR1 branch, this repository adds:
 ## Build and install
 
 ```sh
-git clone https://github.com/noon-at-cgn/3080-20g-p2p && cd 3080-20g-p2p
+git clone https://github.com/noon-at-cgn/geforce-dynbar1-p2p && cd geforce-dynbar1-p2p
 make modules -j"$(nproc)"
 (cd kernel-open && sha256sum nvidia*.ko > SHA256SUMS)    # the pins the scripts check
 ```
@@ -101,9 +112,19 @@ make modules -j"$(nproc)"
 The scripts are in `contrib/3080-20g/`. In `contrib/3080-20g/config.sh`, set `OUT` (the full path of `kernel-open`)
 and `GPUS`: the card addresses from `lspci -Dnn -d 10de::0300`, separated by spaces inside one pair of quotes, never
 commas, e.g. `GPUS="0000:01:00.0 0000:02:00.0"`. The driver's per-device line uses semicolons instead
-(`pci=<address>;RMForceStaticBar1=0;` per card); 3080-20gb-rebar's `install.sh` writes it. Each script takes
-`--dry-run` (print the plan, change nothing) or `--yes`, and refuses any `.ko` that does not match `SHA256SUMS`.
-Every program using the GPUs must be stopped first (or set `DRAIN_CMD` and `RESTORE_CMD`).
+(`pci=<address>;RMForceStaticBar1=0;` per card); geforce-bar1-resize writes it. Each script that changes something
+takes `--dry-run` (print the plan, change nothing) or `--yes`; `p2p-load.sh` and `p2p-install.sh` refuse any `.ko` of
+the build that does not match `SHA256SUMS`. Every program using the GPUs must be stopped first (or set `DRAIN_CMD`
+and `RESTORE_CMD`). If the kernel log shows `RmInitAdapter failed` or `init failed during probe` right after
+`nvidia.ko` is loaded, `p2p-load.sh` unloads it at once, loads nothing else and goes back to stock (if it cannot
+unload it, it stops as below). `p2p-rollback.sh` checks its own load of `nvidia.ko` the same way: if RM init fails
+with that driver too, it unloads it, loads nothing else and stops; a load that fails stops it the same way. Before it
+lets udev run the events it held back, it writes `/run/modprobe.d/zz-p2p-stop-nvidia.conf`, which blocks every
+nvidia module so that no udev rule loads the failing driver again, and then it reports what `lsmod` shows (if nvidia
+could not be unloaded, it says the modules are still loaded: reboot now). The block is in `/run`, so it is gone after
+a reboot, and the next boot loads the same driver (what modprobe resolves; the message names it), which fails the
+same way unless the cause, e.g. missing GSP firmware, is fixed first. To retry without a reboot once it is fixed,
+remove the block by hand: `sudo rm /run/modprobe.d/zz-p2p-stop-nvidia.conf`.
 
 **Load by hand** (nothing installed; a reboot loads what modprobe resolves):
 
@@ -114,7 +135,7 @@ sudo contrib/3080-20g/p2p-rollback.sh --yes   # stock without a reboot (by path 
 sudo contrib/3080-20g/p2p-rollback.sh --yes --to-installed   # reload the boot install instead
 ```
 
-Module options used (the per-card string is the one 3080-20gb-rebar writes):
+Module options used (the per-card string is the one geforce-bar1-resize writes):
 
 ```
 nvidia      NVreg_RegistryDwordsPerDevice="pci=0000:01:00.0;RMForceStaticBar1=0;pci=0000:02:00.0;RMForceStaticBar1=0;" NVreg_EnableResizableBar=0
@@ -122,9 +143,10 @@ nvidia_uvm  uvm_disable_hmm=1
 ```
 
 To turn P2P off, add `RMDynBar1P2PEnable=0;` after each card's `RMForceStaticBar1=0;` in that same line (`P2P_ENABLE=0`
-in `config.sh`; for the boot install, edit the line in modprobe.d); never set the global `NVreg_RegistryDwords`. The
-driver then repeats a rate-limited `... (P2P off)` line, as expected. All tests ran with `uvm_disable_hmm=1`.
-Reinstalling 3080-20gb-rebar rewrites `zz-nvidia-static-bar1.conf` without the opt-out: re-add it afterwards.
+in `config.sh`; for the boot install, `[<address>]="keys=RMDynBar1P2PEnable=0;"` per card in the `CARD` list of
+`/etc/geforce-bar1-resize.conf`, or a hand edit of `zz-geforce-bar1-resize.conf`, which geforce-bar1-resize keeps when
+it rewrites the file); never set the global `NVreg_RegistryDwords`. The driver then repeats a rate-limited
+`... (P2P off)` line, as expected. All tests ran with `uvm_disable_hmm=1`.
 
 **Boot install** (verified on one boot on the tested platform):
 
@@ -136,7 +158,8 @@ sudo contrib/3080-20g/p2p-check.sh
 
 The installer copies the modules to `/lib/modules/<kernel>/updates/p2p/`, writes `/etc/depmod.d/p2p.conf` (one
 `override` per module, this kernel only) and `/etc/modprobe.d/zz-nvidia-p2p.conf`, runs `depmod`, and backs up to
-`/var/backups/p2p-modules/`. Stock modules stay in place; other kernels boot stock. Refuses if the initramfs holds nvidia.
+`/var/backups/p2p-modules/`. Stock modules stay in place; other kernels boot stock. The installer refuses if the
+initramfs holds nvidia.
 
 **Fallback to stock, one command:** `sudo contrib/3080-20g/p2p-fallback.sh --yes`, then reboot (`--live` also swaps
 the running driver). If the P2P kernel does not come up, boot another kernel and run it with `KVER=<P2P kernel>`.

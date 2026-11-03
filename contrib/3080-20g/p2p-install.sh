@@ -1,10 +1,12 @@
 #!/bin/bash
 # Install the patched build for one kernel ($KVER) so that every later load, including the boot, uses it.
-# - Refuses unless every .ko in $OUT matches the SHA256SUMS of your build, the kernel and version 615.71.09.
+# - Refuses unless every .ko in $OUT matches the SHA256SUMS of your build, the kernel and version 615.71.09, and the
+#   GSP firmware of 615.71.09 is where the boot finds it (/lib/firmware/nvidia/615.71.09/, or firmware_class.path=
+#   on the kernel command line).
 # - Keeps the stock modules where they are: /etc/depmod.d/p2p.conf overrides the five module names for $KVER only,
 #   so another kernel still loads its own stock modules, and p2p-fallback.sh returns to stock in one command.
 # - Writes /etc/modprobe.d/zz-nvidia-p2p.conf with the options below; the per-card RMForceStaticBar1=0 line from
-#   3080-20gb-rebar stays where it is and must already be in place.
+#   geforce-bar1-resize stays where it is and must already be in place.
 # - Backs up what it replaces into /var/backups/p2p-modules/<time>/ (RESTORE.txt). Loads and unloads nothing.
 # Usage: p2p-install.sh --dry-run | --yes
 set -u
@@ -19,10 +21,12 @@ preflight_common
 [ -d "$KDIR/kernel" ] || die "kernel $KVER is not installed"
 load_pins "$OUT"
 verify_ko "$OUT"
+fw_check "$KVER" boot
 stock=$(stock_dir)
 [ -n "$stock" ] || die "no stock nvidia module for $KVER outside $SUBDIR: there would be no fallback"
 echo "stock fallback: $stock"
-per_device_configured || die "fix the per-device line in modprobe.d (3080-20gb-rebar's zz-nvidia-static-bar1.conf) first"
+per_device_configured || die "fix the per-device line in modprobe.d first: zz-geforce-bar1-resize.conf of geforce-bar1-resize,
+or zz-nvidia-static-bar1.conf of an older 3080-20gb-rebar install"
 other=$(find /etc/modprobe.d /run/modprobe.d /usr/local/lib/modprobe.d /usr/lib/modprobe.d /lib/modprobe.d -maxdepth 1 \
           -name '*.conf' ! -path "$P2P_CONF" 2>/dev/null | sort -u |
         xargs -r grep -HnE 'NVreg_RegistryDwords=|NVreg_EnableResizableBar|uvm_disable_hmm|^[[:space:]]*(install|remove)[[:space:]]+nvidia')

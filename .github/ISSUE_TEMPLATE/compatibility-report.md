@@ -13,7 +13,7 @@ labels: compatibility
 - IDs (`lspci -Dnn -d 10de::0300`):
 - Memory-modded or stock:
 - vBIOS version (`nvidia-smi -q | grep -i vbios`):
-- 3080-20gb-rebar installed, BAR1 32 GiB on every card (`nvidia-smi -q -d MEMORY`)? yes / no
+- geforce-bar1-resize installed, BAR1 ≥ VRAM on every card (`nvidia-smi -q -d MEMORY`)? yes / no
 
 ## Platform
 

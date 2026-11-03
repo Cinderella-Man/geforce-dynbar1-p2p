@@ -14,6 +14,7 @@ preflight_common
 [ "$(uname -r)" = "$KVER" ] || die "running kernel $(uname -r), the build is for $KVER"
 load_pins "$OUT"
 verify_ko "$OUT"
+fw_check "$KVER"
 loaded nvidia || die "nvidia is not loaded; this script swaps from a running driver"
 sdir=$(stock_dir); stock_srcv=; [ -z "$sdir" ] || stock_srcv=$(modinfo -F srcversion "$(ko_in "$sdir" nvidia)")
 case "$(srcv)" in
@@ -36,8 +37,15 @@ if ! unload_stack; then
 fi
 # shellcheck disable=SC2086  # DEPS is a list of module names
 [ -z "$DEPS" ] || run modprobe -a $DEPS
-ok=1
+ok=1 mark=$(klog_mark)
 run insmod "$OUT/nvidia.ko" "${NV_OPTS[@]}" || ok=0
+# RM init failed on a GPU (the module stays loaded): unload nvidia at once, load nothing on top of it. If it cannot be
+# unloaded, the rollback cannot help: block every nvidia module before udev resumes and stop.
+if [ $ok = 1 ] && [ "$DRY" = 0 ] && f=$(rm_init_failed "$mark"); then
+  echo "RM INIT FAILED after insmod nvidia; unloading it, nothing else is loaded:"; echo "$f"
+  run rmmod nvidia || stop_blocked "RM init failed with $OUT/nvidia.ko and rmmod nvidia failed" "$(modinfo -k "$KVER" -F filename nvidia)"
+  ok=0
+fi
 [ $ok = 1 ] && { run insmod "$OUT/nvidia-modeset.ko" || ok=0; }
 [ $ok = 1 ] && { run insmod "$OUT/nvidia-drm.ko" || ok=0; }
 [ $ok = 1 ] && { run insmod "$OUT/nvidia-uvm.ko" "${UVM_OPTS[@]}" || ok=0; }

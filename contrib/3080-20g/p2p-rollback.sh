@@ -28,7 +28,8 @@ else
     for m in nvidia nvidia-modeset nvidia-drm nvidia-uvm; do
       f=$(ko_in "$sdir" "$m"); [ -n "$f" ] && [ "$(modinfo -F version "$f")" = "$VER" ] || die "stock $sdir/$m.ko missing or not $VER"
     done
-    echo "target: stock $target, by path; modprobe resolves $resolved (a boot install, which stays in place)"
+    echo "target: stock $target, by path"
+    echo "modprobe resolves $resolved (a boot install, which stays in place)"
   fi
 fi
 target_srcv=$(modinfo -F srcversion "$target")
@@ -42,15 +43,28 @@ drain
 echo "== swap"
 pause
 unload_stack || { lsmod | grep '^nvidia'; unpause; die "rmmod failed; left as is, a reboot loads $resolved"; }
+# target_rm_init <what>: RM init failed with the target too (the module stays loaded): unload nvidia, load nothing on
+# top of it, block every nvidia module before udev resumes, stop.
+target_rm_init() {
+  local f
+  if [ "$DRY" = 1 ] || ! f=$(rm_init_failed "$mark"); then return 0; fi
+  echo "RM INIT FAILED after loading $1;"; echo "unloading nvidia, nothing else is loaded:"; echo "$f"
+  run rmmod nvidia || echo "rmmod nvidia FAILED: it stays loaded"
+  stop_blocked "RM init failed with $1 too" "$resolved"
+}
 if [ $BY_PATH = 1 ]; then
   DEPS=$(for m in nvidia nvidia-modeset nvidia-drm nvidia-uvm; do modinfo -F depends "$(ko_in "$sdir" "$m")"; done | tr ',' '\n' | grep -v '^nvidia' | sort -u)
   # shellcheck disable=SC2086  # DEPS is a list of module names
   [ -z "$DEPS" ] || run modprobe -a $DEPS
   mapfile -t opts < <(nvidia_opts | grep -v '^NVreg_EnableResizableBar=')   # per-device string + EXTRA_NVIDIA_OPTS
-  run insmod "$(ko_in "$sdir" nvidia)" "${opts[@]}" || { unpause; die "insmod of the stock nvidia failed; a reboot loads $resolved"; }
+  mark=$(klog_mark)
+  run insmod "$(ko_in "$sdir" nvidia)" "${opts[@]}" || stop_blocked "insmod of the stock nvidia failed" "$resolved"
+  target_rm_init "the stock $target"
   for m in nvidia-modeset nvidia-drm nvidia-uvm; do run insmod "$(ko_in "$sdir" "$m")"; done
 else
-  run modprobe -v nvidia || { unpause; die "modprobe nvidia failed; a reboot loads $resolved"; }
+  mark=$(klog_mark)
+  run modprobe -v nvidia || stop_blocked "modprobe nvidia failed" "$resolved"
+  target_rm_init "$target"
   run modprobe -a nvidia_drm nvidia_uvm
 fi
 unpause

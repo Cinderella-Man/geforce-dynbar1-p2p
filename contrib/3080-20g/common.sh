@@ -47,20 +47,22 @@ preflight_common() {
   case $P2P_ENABLE in ""|0|1) ;; *) die "P2P_ENABLE must be empty, 0 or 1" ;; esac
 }
 
-# The per-device string, in the format 3080-20gb-rebar writes; P2P_ENABLE=0 adds the per-card opt-out.
+# The per-device string, in the format geforce-bar1-resize writes; P2P_ENABLE=0 adds the per-card opt-out.
 dwords() {
   local g
   for g in $GPUS; do
     printf 'pci=%s;RMForceStaticBar1=0;' "$g"; [ "$P2P_ENABLE" != 0 ] || printf 'RMDynBar1P2PEnable=0;'
   done
 }
-# card_ok <per-device string> <card> [static]: the card's entry has RMForceStaticBar1=0 and, unless "static" is
-# given, RMDynBar1P2PEnable=0 exactly when P2P_ENABLE=0. Prints what is wrong.
+# card_ok <per-device string> <card> [static]: the card's entry has RMForceStaticBar1=0 as the last (effective) value of
+# that key and, unless "static" is given, RMDynBar1P2PEnable=0 exactly when P2P_ENABLE=0. Prints what is wrong.
 card_ok() {
-  local s
+  local s v
   [[ $1 == *"pci=$2;"* ]] || { echo "no per-device entry for $2"; return 1; }
   s=${1#*"pci=$2;"}; s="${s%%pci=*};"
   [[ $s == *"RMForceStaticBar1=0;"* ]] || { echo "no RMForceStaticBar1=0 for $2"; return 1; }
+  v=${s##*RMForceStaticBar1=}; v=${v%%;*}
+  [ "$v" = 0 ] || { echo "RMForceStaticBar1=$v for $2 overrides RMForceStaticBar1=0 (last value wins)"; return 1; }
   if [ "${3:-}" = static ]; then return 0
   elif [ "$P2P_ENABLE" = 0 ]; then
     [[ $s == *"RMDynBar1P2PEnable=0;"* ]] || { echo "P2P_ENABLE=0 but no RMDynBar1P2PEnable=0 for $2"; return 1; }
@@ -91,7 +93,10 @@ verify_ko() {
   local m f s vm v
   for m in "${MODS[@]}"; do
     f=$1/$m.ko; [ -f "$f" ] || die "missing $f"
-    s=$(sha256sum "$f" | cut -d' ' -f1); [ "$s" = "${SHA[$m]}" ] || die "$f sha256 $s is not the pinned ${SHA[$m]}"
+    s=$(sha256sum "$f" | cut -d' ' -f1)
+    [ "$s" = "${SHA[$m]}" ] || die "$f sha256 does not match SHA256SUMS:
+  sha256 $s
+  pinned ${SHA[$m]}"
     vm=$(modinfo -F vermagic "$f" | cut -d' ' -f1); v=$(modinfo -F version "$f")
     [ "$vm" = "$KVER" ] && [ "$v" = "$VER" ] || die "$f: vermagic $vm version $v, want $KVER $VER"
     echo "$f sha256 ok, version $v, vermagic $vm"
@@ -109,6 +114,59 @@ events() {
   local k; k=$(dmesg 2>/dev/null)
   echo "Xid $(grep -c 'NVRM: Xid' <<<"$k") AER $(grep -cE 'AER: (Corrected|Uncorrected|Multiple)' <<<"$k") DMAR $(grep -cE 'DMAR: \[DMA' <<<"$k") RmInitAdapter $(grep -c RmInitAdapter <<<"$k")"
 }
+
+# GSP firmware. For every GPU it initializes, the open driver loads nvidia/<version>/gsp_<family>.bin and
+# ucodes_<family>.bin through the kernel's firmware loader (kernel-open/common/inc/nv-firmware.h: family tu10x for
+# Turing and GA100, ga10x from GA102 on). Without them RM init fails on every GPU. fw_files: the files that the cards in
+# GPUS and the GPUs nvidia drives now need.
+fw_files() {
+  local g d
+  for g in $GPUS /sys/bus/pci/drivers/nvidia/????:??:??.?; do
+    d=$(cat "/sys/bus/pci/devices/${g##*/}/device" 2>/dev/null) || continue
+    if [ "$((d))" -ge $((0x2200)) ]; then printf '%s\n' gsp_ga10x.bin ucodes_ga10x.bin
+    elif [ "$((d))" -ge $((0x1e00)) ]; then printf '%s\n' gsp_tu10x.bin ucodes_tu10x.bin; fi
+  done | sort -u
+}
+# fw_dirs <kernel> [boot]: where the firmware loader looks, in its order: firmware_class.path (the running value; with
+# "boot", the one on the kernel command line, which is what the next boot uses), then /lib/firmware/updates/<kernel>,
+# /lib/firmware/updates, /lib/firmware/<kernel>, /lib/firmware.
+fw_dirs() {
+  local p
+  if [ "${2:-}" = boot ]; then p=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^firmware_class\.path=//p' | tail -1)
+  else p=$(cat /sys/module/firmware_class/parameters/path 2>/dev/null); fi
+  [ -z "$p" ] || echo "$p"
+  printf '%s\n' "/lib/firmware/updates/$1" /lib/firmware/updates "/lib/firmware/$1" /lib/firmware
+}
+# fw_check <kernel> [boot]: refuses unless every file of fw_files is in a fw_dirs directory under nvidia/$VER/
+# (uncompressed, .xz or .zst).
+fw_check() {
+  local f d x miss="" dirs
+  mapfile -t dirs < <(fw_dirs "$@")
+  for f in $(fw_files); do
+    for d in "${dirs[@]}"; do
+      for x in "" .xz .zst; do
+        [ -e "$d/nvidia/$VER/$f$x" ] && { echo "GSP firmware: $d/nvidia/$VER/$f$x"; continue 3; }
+      done
+    done
+    miss+=" nvidia/$VER/$f"
+  done
+  [ -z "$miss" ] || die "GSP firmware not found:$miss
+Looked in: ${dirs[*]}${2:+
+firmware_class.path counts only when it is on the kernel command line.}
+Without it RM init fails on every GPU. Install the firmware of the $VER driver, e.g. the firmware/ directory of
+NVIDIA-Linux-x86_64-$VER.run (sh NVIDIA-Linux-x86_64-$VER.run -x),
+copied to /lib/firmware/nvidia/$VER/. Nothing changed."
+}
+
+# The last kernel-log line now; klog_since <that line> prints what the kernel logged after it (everything when the
+# line is gone from the log).
+klog_mark() { dmesg 2>/dev/null | tail -1; }
+klog_since() {
+  dmesg 2>/dev/null | M=$1 awk 'ENVIRON["M"] != "" && $0 == ENVIRON["M"] { n = NR } { l[NR] = $0 } END { for (i = n + 1; i <= NR; i++) print l[i] }'
+}
+# rm_init_failed <mark>: the lines since the mark that say RM init failed on a GPU. The module stays loaded when that
+# happens (kernel-open/nvidia/nv-pci.c logs "init failed during probe" and keeps the device).
+rm_init_failed() { klog_since "$1" | grep -E 'RmInitAdapter failed|init failed during probe'; }
 
 # Runs DRAIN_CMD, then waits up to 10 s for the GPUs to have no holders. Refuses (nothing unloaded) otherwise.
 drain() {
@@ -132,6 +190,33 @@ unpause() {
   trap - EXIT
   run udevadm control --start-exec-queue; run udevadm settle -t 30
   [ -z "$VTCON" ] || { echo "+ echo 1 > $VTCON"; [ "$DRY" = 1 ] || echo 1 >"$VTCON"; }
+}
+# stop_blocked <what failed> <what the next boot loads>: the stop after a failed RM init (or a failed load) while udev
+# is paused. When udev resumes it runs the events it held back since pause, and rules may load nvidia on them (e.g. a
+# 70-nvidia.rules that runs nvidia-modprobe -u and nvidia-smi -L on any nvidia event). So first block every nvidia
+# module in /run/modprobe.d (runtime only: the reboot clears it), then resume udev (unpause settles with a timeout),
+# report what lsmod shows and stop.
+STOP_CONF=/run/modprobe.d/zz-p2p-stop-nvidia.conf
+stop_blocked() {
+  local m l
+  echo "+ write $STOP_CONF: install <module> /bin/false for every nvidia module"
+  { mkdir -p "${STOP_CONF%/*}" && for m in nvidia nvidia_uvm nvidia_modeset nvidia_drm nvidia_peermem \
+      nvidia-uvm nvidia-modeset nvidia-drm nvidia-peermem; do echo "install $m /bin/false"; done >"$STOP_CONF"; } ||
+    echo "WARNING: could not write $STOP_CONF; udev may load nvidia again"
+  unpause
+  l=$(lsmod | grep '^nvidia')
+  echo "lsmod after udev resumed:"; echo "${l:-  no nvidia module}"
+  local why="The next boot loads $2:
+if that is the driver that failed here, it fails the same way unless the cause (e.g. missing or unusable GSP
+firmware, see the kernel log above) is fixed first.
+$STOP_CONF is in /run, so the reboot removes it"
+  [ -z "$l" ] || die "$1; the nvidia modules above are STILL LOADED.
+Do not use the GPUs; reboot now. Until then $STOP_CONF blocks loading any more nvidia modules.
+$why."
+  die "$1; no nvidia driver is loaded.
+$STOP_CONF blocks every nvidia module until the reboot.
+$why.
+To retry without a reboot once the cause is fixed, remove the block by hand: rm $STOP_CONF"
 }
 unload_stack() {
   local m
