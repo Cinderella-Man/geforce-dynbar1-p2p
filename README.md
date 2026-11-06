@@ -81,6 +81,16 @@ For GeForce Blackwell the verdict is `stock`. NVIDIA's own BAR1 P2P on GB20x map
 card in geforce-bar1-resize keeps static BAR1). This reading of the stock rule comes from the driver source; untested
 on Blackwell hardware.
 
+On a GB20x card whose BAR1 can only equal its VRAM, such as the 16 GB RTX 50 cards, the driver does not turn static
+BAR1 on by itself; it needs `RMForceStaticBar1=1`. With the 610 and 620 drivers the GPU can then fail to initialize
+(`kbusEnableStaticBar1Mapping_TU102: Failed to create the static bar1 mapping`), because the mapping starts 512 MiB
+into BAR1 and no longer fits. `RMIncreaseRsvdMemorySizeMB` shrinks it, at the cost of some VRAM. Without static BAR1
+but with forced P2P keys (`ForceP2P`, `RMForceP2PType`), the stock driver reported peer access
+(`cudaDeviceCanAccessPeer` 1) while the copies silently lost data. Both were reported by tronx2100 on an RTX 5060 Ti
+16 GB (GB206) in [geforce-bar1-resize#4](https://github.com/noon-at-cgn/geforce-bar1-resize/issues/4), where
+static-BAR1 P2P worked again with the key. The cause, the formula for the key's value and the geforce-bar1-resize
+config: [driver-option.md](https://github.com/noon-at-cgn/geforce-bar1-resize/blob/main/docs/driver-option.md#static-bar1-on-a-card-whose-bar1-equals-vram).
+
 `not supported` comes with the reason. Among them:
 
 - The two cards are of different architectures (Turing, Ampere, Ada): CUDA itself (libcuda) offers no peer access
