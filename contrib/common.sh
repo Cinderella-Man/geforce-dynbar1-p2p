@@ -285,7 +285,20 @@ unload_stack() {
 resolution() {
   local m f
   for m in "${MODS[@]}"; do
-    f=$(awk -F: -v m="/$m.ko" '{ n = length($1) - length(m) + 1 } n > 0 && substr($1, n) == m { print $1; exit }' "$KDIR/modules.dep")
+    f=$(awk -F: -v m="$m" '
+      {
+        p = $1
+        for (i = 0; i < 4; i++) {
+          ext = (i == 0 ? "" : i == 1 ? ".zst" : i == 2 ? ".xz" : ".gz")
+          suffix = "/" m ".ko" ext
+          if (length(p) >= length(suffix) &&
+              substr(p, length(p) - length(suffix) + 1) == suffix) {
+            print p
+            exit
+          }
+        }
+      }
+    ' "$KDIR/modules.dep")
     echo "$m ${f:-MISSING}"
   done
 }
