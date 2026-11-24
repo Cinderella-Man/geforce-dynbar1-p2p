@@ -36,6 +36,7 @@
 #include <gpu_mgr/gpu_mgr.h>
 
 #include "gpu/bif/kernel_bif.h"
+#include "nvrm_registry.h"
 
 static NV_STATUS osCreateOsDescriptorFromPageArray(OBJGPU *, NvP64, NvHandle, NvU32, NvU64 *, MEMORY_DESCRIPTOR **, void **);
 static void osDestroyOsDescriptorPageArray(PMEMORY_DESCRIPTOR);
@@ -52,7 +53,7 @@ static void osDestroyOsDescriptorFromDmaBuf(PMEMORY_DESCRIPTOR);
 static NV_STATUS osCreateOsDescriptorFromSgtPtr(OBJGPU *, NvP64, NvHandle, NvU32, NvU64 *, MEMORY_DESCRIPTOR **, void**);
 static void osDestroyOsDescriptorFromSgt(PMEMORY_DESCRIPTOR);
 
-static NV_STATUS osCheckGpuBarsOverlapAddrRange(NvRangeU64 addrRange);
+static NV_STATUS osCheckGpuBarsOverlapAddrRange(NvRangeU64 addrRange, NvBool bAllowBar1);
 
 NV_STATUS
 osCreateMemFromOsDescriptor
@@ -414,12 +415,14 @@ osCreateOsDescriptorFromPageArray
 
 /*!
  * @brief Checks if the given address range overlaps with the BARs for any of
- * the GPUs.
+ * the GPUs. With bAllowBar1 (RMPeerIoMemBar1=1 on the registering GPU), a
+ * range inside a GPU's BAR1 (FB aperture) is allowed; BAR0 and BAR2 never are.
  */
 static NV_STATUS
 osCheckGpuBarsOverlapAddrRange
 (
-    NvRangeU64 addrRange
+    NvRangeU64 addrRange,
+    NvBool     bAllowBar1
 )
 {
     NvRangeU64 gpuPhysAddrRange;
@@ -460,7 +463,7 @@ osCheckGpuBarsOverlapAddrRange
         NV_INIT_RANGE(gpuPhysInstAddrRange, pGpu->busInfo.gpuPhysInstAddr,
             pGpu->busInfo.gpuPhysInstAddr + pGpu->instLength -1);
 
-        if (NV_IS_OVERLAPPING_RANGE(gpuPhysFbAddrRange, addrRange) ||
+        if ((!bAllowBar1 && NV_IS_OVERLAPPING_RANGE(gpuPhysFbAddrRange, addrRange)) ||
             NV_IS_OVERLAPPING_RANGE(gpuPhysInstAddrRange, addrRange))
         {
             NV_PRINTF(LEVEL_ERROR,
@@ -509,6 +512,8 @@ osCreateOsDescriptorFromIoMemory
     NvRangeU64 physAddrRange;
     NvU64 *base = 0;
     NvBool bAllowMmap;
+    NvBool bAllowBar1;
+    NvU32 peerIoMemBar1 = 0;
     NvU64 size;
 
     //
@@ -560,7 +565,17 @@ osCreateOsDescriptorFromIoMemory
     physAddrRange.min = *base;
     physAddrRange.max = *base + *pLimit;
 
-    rmStatus = osCheckGpuBarsOverlapAddrRange(physAddrRange);
+    //
+    // RMPeerIoMemBar1=1 on this GPU opts out of that check for BAR1 ranges, so
+    // it can reach another GPU's VRAM through that GPU's BAR1 without CUDA
+    // peer access (for example between architectures CUDA does not pair).
+    // The deadlock above stays possible: move data one way at a time.
+    //
+    bAllowBar1 =
+        (osReadRegistryDword(pGpu, NV_REG_STR_RM_PEER_IO_MEM_BAR1, &peerIoMemBar1) == NV_OK) &&
+        (peerIoMemBar1 == 1);
+
+    rmStatus = osCheckGpuBarsOverlapAddrRange(physAddrRange, bAllowBar1);
     if (rmStatus != NV_OK)
     {
         return rmStatus;

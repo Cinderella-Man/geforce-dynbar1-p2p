@@ -1176,6 +1176,19 @@
 
 //
 // Type: DWORD
+// Peer I/O memory over BAR1 (opt-in, per GPU, read on the GPU that registers).
+// 1 lets this GPU register a range inside another GPU's BAR1 as I/O memory
+// (cudaHostRegister with cudaHostRegisterIoMemory on a CPU mapping of the
+// other GPU's VRAM, for example from Vulkan), so it reaches that GPU's memory
+// without CUDA peer access: also between GPUs of different architectures,
+// which CUDA never pairs. Unset or any other value keeps the stock check in
+// osCheckGpuBarsOverlapAddrRange(), which refuses such ranges because
+// full-duplex P2P over BAR1 can deadlock: move data one way at a time.
+//
+#define NV_REG_STR_RM_PEER_IO_MEM_BAR1                      "RMPeerIoMemBar1"
+
+//
+// Type: DWORD
 // Enables/Disables the WAR for bug 1630288 where we disable 3rd-party peer mappings
 // Disabled by default
 //
