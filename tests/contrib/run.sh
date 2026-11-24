@@ -488,8 +488,10 @@ c07() {
   cfg "$A $B" ""
   full_setup "pci=$A;RMForceStaticBar1=0;pci=$B;RMForceStaticBar1=0;" NS
   sh_ p2p-check.sh --integrity
-  check "untested pair, no peer access: NOT RUN with the trial-load command, no FAIL" out_has "^NOT RUN $A <-> $B: no peer access \(the pair is untested\)\. Trial load .*sudo env P2P_ENABLE=1 .*/p2p-load.sh --yes"
-  check "status 0" eq "$RC" 0
+  check "untested pair, no peer access: NOT RUN with the trial-load command" out_has "^NOT RUN $A <-> $B: no peer access \(the pair is untested\)\. Trial load .*sudo env P2P_ENABLE=1 .*/p2p-load.sh --yes"
+  check "  nothing tested: FAIL, not ALL PASS" out_has "^FAIL integrity: no pair was tested \(0 skipped, 1 not run\)"
+  check "  no ALL PASS line" eq "$(grep -c '^ALL PASS$' "$CDIR/out")" 0
+  check "  status 1" eq "$RC" 1
   # an exit status 0 without cases is no PASS
   cfg "$A $B" 1
   full_setup "pci=$A;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$B;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;" OK
@@ -528,6 +530,17 @@ c07() {
   echo SRC-nvidia >"$FAKE/sys/module/nvidia/srcversion"
   sh_ p2p-check.sh --integrity
   check "PASS names the loaded build and version" has "$FAKE/var/lib/geforce-dynbar1-p2p/integrity-pass" " nvidia SRC-nvidia version 615.71.09 max-mib 4096 cases 264\$"
+  check "  counts the tested pair" out_has '^integrity: 1 pair\(s\) tested, 0 skipped, 0 not run'
+  # the only pair is unsupported (Ampere + Ada: CUDA refuses): skipped, so nothing is tested and that is no ALL PASS
+  reset_fake; card $A 2482; card $B 2684 "Ada Lovelace" 24576
+  cfg "$A $B" 1
+  full_setup "pci=$A;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$B;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;" OK
+  sh_ p2p-check.sh --integrity
+  check "unsupported pair: SKIP" out_has "^SKIP $A <-> $B: not tested \(the pair is unsupported\)\$"
+  check "  the test did not run" eq "$(grep -c 'p2p-integrity stand-in' "$CDIR/out")" 0
+  check "  nothing tested: FAIL" out_has "^FAIL integrity: no pair was tested \(1 skipped, 0 not run\)"
+  check "  no ALL PASS line" eq "$(grep -c '^ALL PASS$' "$CDIR/out")" 0
+  check "  status 1" eq "$RC" 1
 }
 
 c17() {

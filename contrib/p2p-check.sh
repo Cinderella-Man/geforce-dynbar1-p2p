@@ -185,13 +185,16 @@ if [ "$MODE" = integrity ]; then
   command -v timeout >/dev/null || die "timeout (coreutils) is needed for --integrity"
   grace=$((itime / 10 > 5 ? itime / 10 : 5))
   passed=() out=$(mktemp) || die "mktemp failed"
+  # pairs that ran the test, skipped pairs (stock, unsupported) and pairs without peer access (NOT RUN): a run that
+  # tests no pair at all must not end in ALL PASS
+  tested=0 skipped=0 notrun=0
   # a PASS is recorded only when the check above is clean (this build loaded, its options and parameters, topo),
   # and names the loaded build, so p2p-enable.sh can refuse a PASS from another driver.
   checked_fails=$FAILS nvsrc=$(srcv) nvver=$(cat /sys/module/nvidia/version 2>/dev/null)
   # shellcheck disable=SC2086  # GPUS is a list of addresses
   [ -z "$bin" ] || while read -r a b; do
     s=${VSTATE["$a $b"]}
-    case $s in stock | unsupported) echo "SKIP $a <-> $b: not tested (the pair is $s)"; continue ;; esac
+    case $s in stock | unsupported) echo "SKIP $a <-> $b: not tested (the pair is $s)"; skipped=$((skipped + 1)); continue ;; esac
     ev0=$(events "$a" "$b")
     # the test sees only this pair (CUDA_VISIBLE_DEVICES by UUID; the UUIDs are never printed, the report stays
     # free of them), so CUDA does not query, and the driver does not refuse, pairs with other GPUs in the machine.
@@ -206,6 +209,7 @@ if [ "$MODE" = integrity ]; then
     unset CUDA_VISIBLE_DEVICES
     # the size and number of cases that ran, from the test's own last line
     mm='' nc=''; read -r mm nc < <(sed -n "s/^RESULT PASS $a $b max-mib \([0-9]*\) cases \([0-9]*\) .*/\1 \2/p" "$out" | tail -1)
+    if [ "$rc" = 3 ]; then notrun=$((notrun + 1)); else tested=$((tested + 1)); fi
     case $rc in
       0)
         if [ -z "${nc:-}" ] || [ "$nc" = 0 ]; then
@@ -238,6 +242,10 @@ if [ "$MODE" = integrity ]; then
     esac
   done < <(pairs $GPUS)
   rm -f "$out"
+  echo "integrity: $tested pair(s) tested, $skipped skipped, $notrun not run (no peer access)"
+  # a build failure above is already a FAIL line
+  [ -z "$bin" ] || [ "$tested" -gt 0 ] ||
+    fail "integrity: no pair was tested ($skipped skipped, $notrun not run), so nothing here shows that P2P works"
   echo "== report"
   echo "This output is in $P2P_REPORT. Please attach it to a compatibility report: $REPORT_URL"
   echo "It has no serial numbers or GPU UUIDs; check paths and names in it before posting."
