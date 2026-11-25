@@ -3846,16 +3846,48 @@ _nvGpuOpsDynBar1Create(subDeviceDesc *rmSubDevice,
 
     // This source-subdevice budget is only an early rejection heuristic.
     // The BAR1 allocator accounts for all peers, NIC mappings and fragmentation.
-    if ((bar1Size <= DYN_BAR1_P2P_RESERVE) ||
-        (mapSize > bar1Size - DYN_BAR1_P2P_RESERVE) ||
-        (rmSubDevice->dynBar1MappedBytes > bar1Size - DYN_BAR1_P2P_RESERVE - mapSize))
+    //
+    // Count only the windows this GPU holds on pRemoteGpu: those are what
+    // pRemoteGpu's BAR1 holds. The running total over every remote GPU
+    // (dynBar1MappedBytes) capped a GPU with three or more peers at one peer's
+    // BAR1 for all of them together: with peer access between all of four
+    // 16 GiB-BAR1 cards, 5440 MiB per card. One source's windows on one remote
+    // are distinct allocations of that remote, each mapped once in its BAR1
+    // (reuse database), so their sum never exceeds what that BAR1 really holds.
+    //
     {
-        P3_PROBE(P3_TAG_MAP,
-                 "window REJECT budget: gpu=%u mapped=0x%llx mapSize=0x%llx "
-                 "reserve=0x%llx bar1=0x%llx",
-                 gpuGetInstance(pRemoteGpu), rmSubDevice->dynBar1MappedBytes,
-                 mapSize, DYN_BAR1_P2P_RESERVE, bar1Size);
-        return NV_ERR_INSUFFICIENT_RESOURCES;
+        extern NvBool nv_dynbar1_log_ratelimit(void);
+        gpuDynBar1P2PMapping *pCur;
+        NvU64 mappedOnRemote = 0;
+
+        for (pCur = rmSubDevice->pDynBar1List; pCur != NULL; pCur = pCur->pNext)
+        {
+            if (pCur->pRemoteGpu == pRemoteGpu)
+                mappedOnRemote += pCur->size;
+        }
+
+        if ((bar1Size <= DYN_BAR1_P2P_RESERVE) ||
+            (mapSize > bar1Size - DYN_BAR1_P2P_RESERVE) ||
+            (mappedOnRemote > bar1Size - DYN_BAR1_P2P_RESERVE - mapSize))
+        {
+            P3_PROBE(P3_TAG_MAP,
+                     "window REJECT budget: gpu=%u mapped=0x%llx mapSize=0x%llx "
+                     "reserve=0x%llx bar1=0x%llx",
+                     gpuGetInstance(pRemoteGpu), mappedOnRemote,
+                     mapSize, DYN_BAR1_P2P_RESERVE, bar1Size);
+            // Without this line the caller sees only out of memory.
+            if (nv_dynbar1_log_ratelimit())
+            {
+                NV_PRINTF(LEVEL_ERROR,
+                          "METHOD3: peer window refused: GPU%u has 0x%llx bytes of GPU%u "
+                          "mapped, 0x%llx more would exceed its BAR1 0x%llx minus "
+                          "the reserve 0x%llx\n",
+                          gpuGetInstance(pMappingGpu), mappedOnRemote,
+                          gpuGetInstance(pRemoteGpu), mapSize, bar1Size,
+                          DYN_BAR1_P2P_RESERVE);
+            }
+            return NV_ERR_INSUFFICIENT_RESOURCES;
+        }
     }
 
     // Linear peer PTEs require one contiguous BAR1 VA range. FB pages may
