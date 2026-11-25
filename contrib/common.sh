@@ -39,10 +39,22 @@ loaded() { [ -d "/sys/module/$1" ]; }
 param() { cat "/sys/module/$1/parameters/$2" 2>/dev/null; }
 
 srcv() { cat /sys/module/nvidia/srcversion 2>/dev/null; }
-# Directory of the stock nvidia module for $KVER (anywhere outside updates/p2p); empty if there is none.
-stock_dir() { local f; f=$(find "$KDIR" -path "$DEST" -prune -o -name 'nvidia.ko*' -print | head -1); [ -z "$f" ] || dirname "$f"; }
+# Module files only: nvidia.ko, .ko.zst, .ko.xz or .ko.gz, not the nvidia.ko.sig and .o files that Ubuntu's
+# prebuilt-module packages (linux-signatures-nvidia-<kernel>, linux-objects-nvidia-<branch>-<kernel>) keep in
+# kernel/nvidia-<branch>/bits/ and leave behind after a switch to another driver.
+KO_RE='\.ko(\.(zst|xz|gz))?'
+# Directory of the stock nvidia module for $KVER (anywhere outside updates/p2p); empty if there is none. With modules
+# of several branches installed, the one of version $VER wins.
+stock_dir() {
+  local f first=
+  while IFS= read -r f; do
+    [ -n "$first" ] || first=$f
+    [ "$(modinfo -F version "$f" 2>/dev/null)" = "$VER" ] && { dirname "$f"; return 0; }
+  done < <(find "$KDIR" -regextype posix-extended -path "$DEST" -prune -o -regex ".*/nvidia$KO_RE" -print)
+  [ -z "$first" ] || dirname "$first"
+}
 # ko_in <dir> <module>: the module file in dir, compressed or not.
-ko_in() { find "$1" -maxdepth 1 -name "$2.ko*" | head -1; }
+ko_in() { find "$1" -maxdepth 1 -regextype posix-extended -regex ".*/$2$KO_RE" | head -1; }
 
 # --yes or --dry-run, plus the flags a script allows ($1 = space-separated list); sets DRY and FLAGS.
 parse_args() {

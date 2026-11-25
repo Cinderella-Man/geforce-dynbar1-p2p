@@ -977,6 +977,27 @@ c24() {
 }
 run_case 24-handover-loaded "p2p-load.sh -> p2p-rollback.sh: a refusal with nvidia loaded resumes udev, blocks nothing" c24
 
+c25() {
+  # Ubuntu's prebuilt-module packages leave kernel/nvidia-<branch>/bits/ behind after a switch to another driver
+  # (nvidia.ko.sig from linux-signatures-nvidia-<kernel>, .o files from linux-objects-nvidia-<branch>-<kernel>), and a
+  # whole module of another branch can stay too: the stock module is still the 615.71.09 one
+  card $A 2206; card $B 2206; stock_loaded "$PD2"; cfg "$A $B" ""
+  local K=$FAKE/lib/modules/stand-in/kernel
+  mkdir -p "$K/nvidia-595/bits" "$K/nvidia-595-open"
+  : >"$K/nvidia-595/bits/nvidia.ko.sig"; : >"$K/nvidia-595/bits/nvidia-uvm.ko.sig"; : >"$K/nvidia-595/bits/nvidia.mod.o"
+  printf 'srcversion=OTHER-nvidia\nvermagic=stand-in SMP\nversion=595.58.03\ndepends=\n' >"$K/nvidia-595-open/nvidia.ko"
+  lib 'ko_in "$KDIR/kernel/nvidia-595/bits" nvidia; echo "[$(ko_in "$KDIR/kernel/drivers/video" nvidia-uvm)]"'
+  check "ko_in: a .sig next to it is not a module" eq "$(cat "$CDIR/out")" "[$K/drivers/video/nvidia-uvm.ko]"
+  lib 'stock_dir'
+  check "stock_dir: the 615.71.09 module, not bits/ and not the 595 module" eq "$(cat "$CDIR/out")" "$K/drivers/video"
+  sh_ p2p-load.sh --dry-run
+  check "p2p-load.sh plan starts from the stock driver" out_has "^start: the stock driver \($K/drivers/video\)\$"
+  rm -r "$K/drivers"
+  lib 'stock_dir'
+  check "stock_dir with only another branch's module: that one (its version is checked where it matters)" eq "$(cat "$CDIR/out")" "$K/nvidia-595-open"
+}
+run_case 25-leftover-prebuilt "stock_dir/ko_in next to Ubuntu's leftover bits/ (.sig, .o) and another branch's module" c25
+
 c10() {
   card $A 2206; card $B 2206; card $C 2206
   cfg "$A $B" ""
