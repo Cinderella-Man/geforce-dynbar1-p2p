@@ -602,6 +602,11 @@ pair FAILs:
 A hung peer transfer ends in `FAIL integrity A <-> B: timed out` and the last kernel-log lines, not in a hang. No
 further pair is tested in that run (reboot first).
 
+A slow pair that reaches the limit for the whole pair, with every complete case byte-exact, no transfer over its own
+limit and no new kernel-log events, ends in `FAIL integrity A <-> B: incomplete` instead, with a larger
+`INTEGRITY_TIMEOUT` estimated from the cases done, and the next pair is tested. A slow pair is a hint to compare its
+bandwidth with copies through host memory ([Slow P2P across CPU sockets](#slow-p2p-across-cpu-sockets)).
+
 A hang inside the kernel driver itself (the test process stuck in the kernel, state `D` in `ps`) cannot be timed out.
 Then neither the test's own limit (exit 4) nor the outer `timeout` can end it, `--integrity` hangs too, and only a
 reboot frees the GPUs.

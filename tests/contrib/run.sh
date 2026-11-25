@@ -437,12 +437,15 @@ run_case 06-check "p2p-check.sh: BAR1 >= VRAM, verdicts against nvidia-smi topo 
 
 # standin_integrity: the integrity test stand-in in place of contrib/integrity/p2p-integrity. Status from
 # $FAKE/integrity-rc, cases from $FAKE/integrity-cases (default 264); $FAKE/integrity-xid adds an Xid line of the
-# pair, -hang hangs, -other adds a refusal and an Xid of a third card, -own a refusal naming a card of the pair; the
-# CUDA_VISIBLE_DEVICES it got goes to $FAKE/visible. Arguments: --pair A B --max-mib N ...
+# pair, -hang hangs, -other adds a refusal and an Xid of a third card, -own a refusal naming a card of the pair, -slow
+# makes status 4 the run limit after two complete clean cases (a slow path); --selftest prints the planned cases from
+# $FAKE/integrity-plan (default 252). The CUDA_VISIBLE_DEVICES it got goes to $FAKE/visible. Arguments: --pair A B
+# --max-mib N ...
 standin_integrity() {
   mkdir -p "$SRC/contrib/integrity"
   cat >"$SRC/contrib/integrity/p2p-integrity" <<'EOF'
 #!/bin/bash
+[ "$1" != --selftest ] || { echo "cases $(cat "$FAKE/integrity-plan" 2>/dev/null || echo 252)"; echo "selftest ok"; exit 0; }
 echo "p2p-integrity stand-in $*"
 [ ! -e "$FAKE/integrity-xid" ] || echo "NVRM: Xid (PCI:0000:01:00): 31, fake" >>"$FAKE/dmesg"
 [ ! -e "$FAKE/integrity-hang" ] || sleep 600
@@ -452,7 +455,14 @@ echo "${CUDA_VISIBLE_DEVICES-unset}" >"$FAKE/visible"
   "NVRM: Xid (PCI:0000:21:00): 79, fake" >>"$FAKE/dmesg"
 [ ! -e "$FAKE/integrity-own" ] || echo "NVRM: DynBar1P2P: GPU 0000:01:00: fake refusal; BAR1 P2P not advertised for pair GPU0 <-> GPU1" >>"$FAKE/dmesg"
 rc=$(cat "$FAKE/integrity-rc" 2>/dev/null || echo 0)
-case $rc in 0) r=PASS ;; 3) r=NO_P2P ;; 4) echo "  TIMEOUT: push did not finish"; r=FAIL ;; *) r=FAIL ;; esac
+if [ "$rc" = 4 ] && [ -e "$FAKE/integrity-slow" ]; then
+  for n in 1 2; do
+    echo "case $n malloc 4 KiB words [0, 512) of 512 random: A->B push ok 0.1 ms pull ok 0.1 ms store ok 0.1 ms load ok 0.1 ms | B->A push ok 0.1 ms pull ok 0.1 ms store ok 0.1 ms load ok 0.1 ms"
+  done
+  printf '\n  TIMEOUT: --timeout reached (hung peer transfer?)\nRESULT FAIL %s %s timeout\n' "$2" "$3"
+  exit 4
+fi
+case $rc in 0) r=PASS ;; 3) r=NO_P2P ;; 4) echo "  TIMEOUT: push did not finish within 184 s (hung peer transfer?)"; r=FAIL ;; *) r=FAIL ;; esac
 echo "RESULT $r $2 $3 max-mib $5 cases $(cat "$FAKE/integrity-cases" 2>/dev/null || echo 264) transfers 8 copied 1.0 GiB"
 exit "$rc"
 EOF
@@ -1048,6 +1058,27 @@ c26() {
 }
 run_case 26-cpu-sockets "pairs on two Intel CPU sockets refused as in stock (TNS): verdict, the check, --integrity" c26
 
+c27() {
+  # a slow pair (0.23 GB/s across CPU sockets in an outside report): the run limit reached after clean cases is
+  # incomplete, not a hang, and the next pair still runs; a new Xid or a transfer over its own limit still stops
+  card $A 2482; card $B 2482; card $C 2482
+  cfg "$A $B $C" 1
+  full_setup "pci=$A;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$B;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$C;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;" OK
+  standin_integrity
+  echo 4 >"$FAKE/integrity-rc"; touch "$FAKE/integrity-slow"
+  sh_ p2p-check.sh --integrity
+  check "slow pair: incomplete, with the cases done and planned" out_has "^FAIL integrity $A <-> $B: incomplete, the run limit of 3248 s was reached after 2 of 252 cases, every complete case byte-exact, no transfer over its 184 s limit, no new kernel log events: a slow peer path, not a hung one\$"
+  check "  a larger limit estimated from the cases done (3248 * 252/2 * 1.5)" out_has "^Run again with a larger limit: INTEGRITY_TIMEOUT=613872 "
+  check "  every pair tried, none STOPPED" eq "$(grep -c '^-- ' "$CDIR/out")/$(grep -c '^STOPPED after the timeout' "$CDIR/out")" "3/0"
+  check "  no wedged warning, three incomplete lines" eq "$(grep -c 'may be wedged' "$CDIR/out")/$(grep -c '^FAIL integrity .*: incomplete' "$CDIR/out")" "0/3"
+  touch "$FAKE/integrity-xid"
+  sh_ p2p-check.sh --integrity
+  check "slow pair with a new Xid: timed out and STOPPED, as before" eq "$(grep -c "^FAIL integrity $A <-> $B: timed out" "$CDIR/out")/$(grep -c '^STOPPED after the timeout' "$CDIR/out")" "1/1"
+  rm -f "$FAKE/integrity-xid" "$FAKE/integrity-slow"
+  sh_ p2p-check.sh --integrity
+  check "a transfer over its own limit: timed out and STOPPED, as before" eq "$(grep -c "^FAIL integrity $A <-> $B: timed out" "$CDIR/out")/$(grep -c '^STOPPED after the timeout' "$CDIR/out")" "1/1"
+}
+run_case 27-integrity-slow "--integrity: the run limit reached after clean cases is incomplete, not a hang" c27
 
 c10() {
   card $A 2206; card $B 2206; card $C 2206

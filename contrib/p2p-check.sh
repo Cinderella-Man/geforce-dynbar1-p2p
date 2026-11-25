@@ -234,6 +234,19 @@ if [ "$MODE" = integrity ]; then
           fail "integrity $a <-> $b: no peer access although the pair is $s"
         fi ;;
       4 | 124 | 137)
+        # the run limit (--timeout) reached while every transfer so far finished within its own limit, every complete
+        # case byte-exact and no new kernel log events: a slow peer path, not a hung one. Say so and go on.
+        ok=$(grep -cE '^case [0-9]+ .* \| B->A( [a-z]+ ok [0-9.]+ ms){4}$' "$out")
+        if [ "$rc" = 4 ] && grep -q 'TIMEOUT: --timeout reached' "$out" && [ "$ok" -gt 0 ] && [ "$ev0" = "$ev1" ] &&
+          ! grep -qE 'MISMATCH|CUDA (driver )?error|did not finish within' "$out"; then
+          plan=$("$bin" --selftest --max-mib "$MAXMIB" 2>/dev/null | sed -n 's/^cases \([0-9]*\)$/\1/p')
+          if [[ $plan =~ ^[1-9][0-9]*$ ]] && [ "$plan" -gt "$ok" ]; then more=$((itime * plan * 3 / ok / 2)); else more=$((itime * 3)); fi
+          fail "integrity $a <-> $b: incomplete, the run limit of ${itime} s was reached after $ok of ${plan:-?} cases," \
+            "every complete case byte-exact, no transfer over its ${otime} s limit, no new kernel log events: a slow peer path, not a hung one"
+          echo "Run again with a larger limit: INTEGRITY_TIMEOUT=$more (estimated from the cases done). A slow peer path" \
+            "can be slower than copies through host memory, where P2P gains nothing (README, Slow P2P across CPU sockets)."
+          continue
+        fi
         fail "integrity $a <-> $b: timed out (hung peer transfer?; limits ${itime} s for the run, ${otime} s per transfer)"
         echo "kernel log, last lines:"; dmesg 2>/dev/null | tail -20 | sed 's/^/  /'
         echo "STOPPED after the timeout: the GPUs may be wedged, so no further pair is tested. Reboot before testing again."
