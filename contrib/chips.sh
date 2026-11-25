@@ -140,6 +140,34 @@ vram_mib() {
   [[ $v =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]] && echo "${BASH_REMATCH[1]}"
 }
 
+# root_port <address>: the PCIe root port above the card (the first device below its host bridge), or nothing.
+root_port() {
+  local p
+  p=$(readlink -f "/sys/bus/pci/devices/$1" 2>/dev/null) || return 0
+  [[ $p =~ /pci[0-9a-f]{4}:[0-9a-f]{2}/([0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])/ ]] && echo "${BASH_REMATCH[1]}"
+}
+# ioh_root_port <root port address>: true for the Intel root ports of the driver's I/O hub check (p2p_caps.c, the
+# same list): X58/5520 IOH, Sandy Bridge-EP, Ivy Bridge-EP/EX, Haswell-EP/EX, Broadwell-EP/EX. From Sandy Bridge-EP
+# on, each CPU socket is one I/O hub with all its root ports on one bus.
+ioh_root_port() {
+  local d=/sys/bus/pci/devices/$1 id
+  [ "$(rd "$d/vendor")" = 8086 ] || return 1
+  id=$(rd "$d/device") && [[ $id =~ ^[0-9a-f]{4}$ ]] || return 1
+  id=$((16#$id))
+  ((id >= 0x3408 && id <= 0x3411 || id >= 0x3c02 && id <= 0x3c0b || id >= 0x0e02 && id <= 0x0e0b ||
+    id >= 0x2f01 && id <= 0x2f0b || id >= 0x6f01 && id <= 0x6f0b || id == 0x3420 || id == 0x3421))
+}
+# ioh_split <address A> <address B>: true when both cards sit under such root ports on different buses (two I/O
+# hubs: two CPU sockets), where the driver refuses P2P as NVIDIA's own does (TNS) unless ForceP2P is set; prints the
+# two root ports.
+ioh_split() {
+  local ra rb
+  ra=$(root_port "$1") rb=$(root_port "$2")
+  [ -n "$ra" ] && [ -n "$rb" ] && ioh_root_port "$ra" && ioh_root_port "$rb" || return 1
+  [ "${ra%:*}" != "${rb%:*}" ] || return 1
+  echo "$ra and $rb"
+}
+
 # pair_verdict <per-device string> <address A> <address B>: sets V_STATE and V_TEXT. V_STATE:
 #   verified    both cards RTX 3080 20GB, P2P on by default
 #   default     on by default (GA102) but at least one card is not the verified RTX 3080 20GB: untested
@@ -151,7 +179,7 @@ vram_mib() {
 #   unsupported anything else; V_TEXT says why
 # The per-device string is the one the driver uses (the running driver's, or the one modprobe reads at the next load).
 pair_verdict() {
-  local pd=$1 a=$2 b=$3 g k arch="" chips="" need="" off="" why="" st="" bar vram
+  local pd=$1 a=$2 b=$3 g k arch="" chips="" need="" off="" why="" st="" bar vram rps
   local -A cls=()
   V_STATE=unsupported V_TEXT=""
   for g in "$a" "$b"; do
@@ -172,6 +200,13 @@ pair_verdict() {
     done
     [ -z "$why" ] || V_TEXT+="; stock BAR1 P2P needs static BAR1, which RMForceStaticBar1=0 turns off for$why (driver_option=off for the card in geforce-bar1-resize)"
     V_TEXT+=")"
+    return 0
+  fi
+  if rps=$(ioh_split "$a" "$b"); then
+    V_TEXT="not supported ($chips: the cards sit on two Intel CPU sockets, root ports $rps; P2P between them would"
+    V_TEXT+=" cross the link between the CPUs, slower than copies through host memory (0.23 GB/s peer writes in a"
+    V_TEXT+=" report on a Xeon E7 v4), so the driver refuses it as NVIDIA's own does: TNS in nvidia-smi topo -p2p."
+    V_TEXT+=" Put cards that exchange data on one socket)"
     return 0
   fi
   for g in "$a" "$b"; do

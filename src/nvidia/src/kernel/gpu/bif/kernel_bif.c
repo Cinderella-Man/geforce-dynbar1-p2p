@@ -1185,7 +1185,9 @@ _kbifInitRegistryOverrides
     // reads and writes without overriding platform atomic capabilities. This
     // skips stock's PCIe topology/chipset and host-system checks
     // (p2p_caps.c); it was tested on one platform only (X99, Xeon E5 v4, two
-    // CPU root ports, no switch). Other GPUs keep the stock default.
+    // CPU root ports, no switch). Stock's Intel I/O hub check (GPUs on two
+    // CPU sockets) is kept: p2pGetCapsStatus repeats it unless the user sets
+    // ForceP2P. Other GPUs keep the stock default.
     //
     pKernelBif->p2pOverride = BIF_P2P_NOT_OVERRIDEN;
     if (bDynBar1P2PArmed)

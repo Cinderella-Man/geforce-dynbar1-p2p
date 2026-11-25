@@ -465,6 +465,92 @@ _kp2pCapsCheckStatusOverridesForPcie
     return NV_FALSE;
 }
 
+//
+// Is the GPU's root port one of the Intel root ports of stock's I/O hub check
+// (the PCIe walk below)? X58/5520 IOH, Sandy Bridge-EP, Ivy Bridge-EP/EX,
+// Haswell-EP/EX, Broadwell-EP/EX. From Sandy Bridge-EP on, each CPU socket is
+// one I/O hub, with all its root ports on one bus. 3080-20g: moved here from
+// the walk, unchanged, to share it with the dynamic BAR1 route.
+//
+static NvBool
+_p2pIsIntelIohRootPort(OBJGPU *pGpu)
+{
+    NvU16 deviceID;
+
+    if (!pGpu->gpuClData.rootPort.addr.valid ||
+        (pGpu->gpuClData.rootPort.VendorID != PCI_VENDOR_ID_INTEL))
+    {
+        return NV_FALSE;
+    }
+
+    deviceID = pGpu->gpuClData.rootPort.DeviceID;
+
+    return (((deviceID >= DEVICE_ID_INTEL_3408_ROOT_PORT) &&
+             (deviceID <= DEVICE_ID_INTEL_3411_ROOT_PORT)) ||
+            ((deviceID >= DEVICE_ID_INTEL_3C02_ROOT_PORT) &&
+             (deviceID <= DEVICE_ID_INTEL_3C0B_ROOT_PORT)) ||
+            ((deviceID >= DEVICE_ID_INTEL_0E02_ROOT_PORT) &&
+             (deviceID <= DEVICE_ID_INTEL_0E0B_ROOT_PORT)) ||
+            ((deviceID >= DEVICE_ID_INTEL_2F01_ROOT_PORT) &&
+             (deviceID <= DEVICE_ID_INTEL_2F0B_ROOT_PORT)) ||
+            ((deviceID >= DEVICE_ID_INTEL_6F01_ROOT_PORT) &&
+             (deviceID <= DEVICE_ID_INTEL_6F0B_ROOT_PORT)) ||
+            (deviceID == DEVICE_ID_INTEL_3420_ROOT_PORT) ||
+            (deviceID == DEVICE_ID_INTEL_3421_ROOT_PORT));
+}
+
+//
+// 3080-20g: do two GPUs of the mask sit under such root ports of two different
+// I/O hubs (root ports on different buses)? The test of stock's PCIe walk,
+// which the forced ForceP2P default of armed GPUs (kernel_bif.c) skips. Sets
+// the two GPUs when it is true.
+//
+static NvBool
+_p2pIsAcrossIntelIoh(NvU32 gpuMask, OBJGPU **ppGpu0, OBJGPU **ppGpu1)
+{
+    NvU32   gpuInstance = 0;
+    OBJGPU *pGpu;
+    OBJGPU *pRefGpu = NULL;
+
+    while ((pGpu = gpumgrGetNextGpu(gpuMask, &gpuInstance)) != NULL)
+    {
+        if (!_p2pIsIntelIohRootPort(pGpu))
+            continue;
+
+        if (pRefGpu == NULL)
+        {
+            pRefGpu = pGpu;
+        }
+        else if ((pRefGpu->gpuClData.rootPort.addr.domain != pGpu->gpuClData.rootPort.addr.domain) ||
+                 (pRefGpu->gpuClData.rootPort.addr.bus != pGpu->gpuClData.rootPort.addr.bus))
+        {
+            *ppGpu0 = pRefGpu;
+            *ppGpu1 = pGpu;
+            return NV_TRUE;
+        }
+    }
+
+    return NV_FALSE;
+}
+
+// 3080-20g: is the ForceP2P registry key set for a GPU of the mask (by the
+// user, as opposed to the forced default of armed GPUs)?
+static NvBool
+_p2pIsForceP2PRegkeySet(NvU32 gpuMask)
+{
+    NvU32   gpuInstance = 0;
+    NvU32   data32;
+    OBJGPU *pGpu;
+
+    while ((pGpu = gpumgrGetNextGpu(gpuMask, &gpuInstance)) != NULL)
+    {
+        if (osReadRegistryDword(pGpu, NV_REG_STR_CL_FORCE_P2P, &data32) == NV_OK)
+            return NV_TRUE;
+    }
+
+    return NV_FALSE;
+}
+
 /**
  * @brief Check GPU Pcie mailbox P2P capability
  *
@@ -495,7 +581,6 @@ _kp2pCapsGetStatusOverPcie
     NvU8 iohBus_ref = 0xFF;
     NvU8 pciSwitchBus = 0, pciSwitchBus_ref = 0xFF;
     NvBool bCommonPciSwitchFound = NV_TRUE;
-    NvU16 deviceID;
     NvU8 gpuP2PReadCapsStatus = NV0000_P2P_CAPS_STATUS_OK;
     NvU8 gpuP2PWriteCapsStatus = NV0000_P2P_CAPS_STATUS_OK;
     NvU32 lockedGpuMask = 0;
@@ -569,36 +654,19 @@ _kp2pCapsGetStatusOverPcie
         // complement the table-driven chipset validation check below
         // with an IOH-specific topology check.
         //
-        if (pGpu->gpuClData.rootPort.addr.valid &&
-            (pGpu->gpuClData.rootPort.VendorID == PCI_VENDOR_ID_INTEL))
+        if (_p2pIsIntelIohRootPort(pGpu))
         {
-            deviceID = pGpu->gpuClData.rootPort.DeviceID;
-
-            if (((deviceID >= DEVICE_ID_INTEL_3408_ROOT_PORT) &&
-                 (deviceID <= DEVICE_ID_INTEL_3411_ROOT_PORT)) ||
-                ((deviceID >= DEVICE_ID_INTEL_3C02_ROOT_PORT) &&
-                 (deviceID <= DEVICE_ID_INTEL_3C0B_ROOT_PORT)) ||
-                ((deviceID >= DEVICE_ID_INTEL_0E02_ROOT_PORT) &&
-                 (deviceID <= DEVICE_ID_INTEL_0E0B_ROOT_PORT)) ||
-                ((deviceID >= DEVICE_ID_INTEL_2F01_ROOT_PORT) &&
-                 (deviceID <= DEVICE_ID_INTEL_2F0B_ROOT_PORT)) ||
-                ((deviceID >= DEVICE_ID_INTEL_6F01_ROOT_PORT) &&
-                 (deviceID <= DEVICE_ID_INTEL_6F0B_ROOT_PORT)) ||
-                (deviceID == DEVICE_ID_INTEL_3420_ROOT_PORT) ||
-                 (deviceID == DEVICE_ID_INTEL_3421_ROOT_PORT))
+            if (iohDomain_ref == 0xFFFFFFFF)
             {
-                if (iohDomain_ref == 0xFFFFFFFF)
-                {
-                    iohDomain_ref = pGpu->gpuClData.rootPort.addr.domain;
-                    iohBus_ref = pGpu->gpuClData.rootPort.addr.bus;
-                }
-                else if ((iohDomain_ref != pGpu->gpuClData.rootPort.addr.domain) ||
-                         (iohBus_ref != pGpu->gpuClData.rootPort.addr.bus))
-                {
-                    *pP2PReadCapStatus = NV0000_P2P_CAPS_STATUS_IOH_TOPOLOGY_NOT_SUPPORTED;
-                    *pP2PWriteCapStatus = NV0000_P2P_CAPS_STATUS_IOH_TOPOLOGY_NOT_SUPPORTED;
-                    goto done;
-                }
+                iohDomain_ref = pGpu->gpuClData.rootPort.addr.domain;
+                iohBus_ref = pGpu->gpuClData.rootPort.addr.bus;
+            }
+            else if ((iohDomain_ref != pGpu->gpuClData.rootPort.addr.domain) ||
+                     (iohBus_ref != pGpu->gpuClData.rootPort.addr.bus))
+            {
+                *pP2PReadCapStatus = NV0000_P2P_CAPS_STATUS_IOH_TOPOLOGY_NOT_SUPPORTED;
+                *pP2PWriteCapStatus = NV0000_P2P_CAPS_STATUS_IOH_TOPOLOGY_NOT_SUPPORTED;
+                goto done;
             }
         }
 
@@ -1106,6 +1174,38 @@ p2pGetCapsStatus
         }
 
         return NV_OK;
+    }
+
+    //
+    // 3080-20g: GPUs on two Intel I/O hubs, that is two CPU sockets of the
+    // Sandy Bridge-EP to Broadwell-EP/EX generations. Stock refuses such a
+    // pair in the PCIe walk (IOH_TOPOLOGY_NOT_SUPPORTED, TNS in nvidia-smi
+    // topo -p2p); the forced ForceP2P default of armed GPUs (kernel_bif.c)
+    // skips that check, and the route then offered P2P across the link
+    // between the CPUs, which in an outside report (four Xeon E7-8890 v4,
+    // RTX 2080 Ti on PCIe 3.0 x16 root ports) ran at 0.23 GB/s for peer
+    // writes and 1.3 GB/s for peer reads, far slower than copies staged
+    // through host memory. Keep stock's refusal. A ForceP2P registry key set
+    // by the user still overrides it, as in stock.
+    //
+    {
+        OBJGPU *pIohGpu0 = NULL;
+        OBJGPU *pIohGpu1 = NULL;
+
+        if (_p2pIsAcrossIntelIoh(gpuMask, &pIohGpu0, &pIohGpu1) &&
+            !_p2pIsForceP2PRegkeySet(gpuMask))
+        {
+            *pP2PReadCapStatus  = NV0000_P2P_CAPS_STATUS_IOH_TOPOLOGY_NOT_SUPPORTED;
+            *pP2PWriteCapStatus = NV0000_P2P_CAPS_STATUS_IOH_TOPOLOGY_NOT_SUPPORTED;
+            dynBar1P2PLogRefusal(pIohGpu0,
+                                 "peer on another Intel CPU socket (I/O hub), refused as in stock: "
+                                 "P2P across the CPU link is slower than copies through host memory; "
+                                 "ForceP2P overrides",
+                                 gpuGetInstance(pIohGpu0), gpuGetInstance(pIohGpu1));
+            P3_PROBE(P3_TAG_PEERQ, "IOH split: GPU%u <-> GPU%u, TNS",
+                     gpuGetInstance(pIohGpu0), gpuGetInstance(pIohGpu1));
+            return NV_OK;
+        }
     }
 
     //

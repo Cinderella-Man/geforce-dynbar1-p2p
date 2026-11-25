@@ -998,6 +998,57 @@ c25() {
 }
 run_case 25-leftover-prebuilt "stock_dir/ko_in next to Ubuntu's leftover bits/ (.sig, .o) and another branch's module" c25
 
+# on_root_port ROOT-PORT VENDOR DEVICE CARD...: a root port (ids in hex without 0x) below its host bridge in the fake
+# /sys/devices, with the cards (made with card) moved below it, linked from /sys/bus/pci/devices as on a real system
+on_root_port() {
+  local rp=$1 ven=$2 dev=$3 host b
+  shift 3
+  host=$FAKE/sys/devices/pci${rp%:*}
+  mkdir -p "$host/$rp"; echo "0x$ven" >"$host/$rp/vendor"; echo "0x$dev" >"$host/$rp/device"
+  ln -sfn "$host/$rp" "$FAKE/sys/bus/pci/devices/$rp"
+  for b in "$@"; do
+    mv "$FAKE/sys/bus/pci/devices/$b" "$host/$rp/$b" && ln -sfn "$host/$rp/$b" "$FAKE/sys/bus/pci/devices/$b"
+  done
+}
+c26() {
+  # an outside report: RTX 2080 Ti 22GB cards on root ports of different Broadwell-EX sockets (8086:6f08,
+  # 8086:6f04); the driver refuses such pairs as stock does (TNS), the scripts must say why and not expect OK
+  local D=0000:41:00.0 pd v
+  cfg "" ""
+  card $A 1e07 Turing 22528 32768; card $B 1e07 Turing 22528 32768; card $D 1e07 Turing 22528 32768
+  on_root_port 0000:00:03.0 8086 6f08 $A; on_root_port 0000:00:02.0 8086 6f04 $B; on_root_port 0000:40:02.0 8086 6f04 $D
+  pd="pci=$A;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$B;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$D;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;"
+  v() { lib "pair_verdict '$1' $2 $3; echo \"\$V_STATE|\$V_TEXT\""; cat "$CDIR/out"; }
+  lib "root_port $A; root_port $D"
+  check "root_port: the first device below the host bridge" eq "$(tr '\n' ' ' <"$CDIR/out")" "0000:00:03.0 0000:40:02.0 "
+  v=$(v "$pd" $A $D)
+  check "two Broadwell sockets: not supported" eq "${v%%|*}" unsupported
+  check "  names both root ports" eq "$(grep -o 'two Intel CPU sockets, root ports [^;]*' <<<"$v")" "two Intel CPU sockets, root ports 0000:00:03.0 and 0000:40:02.0"
+  check "  says the driver refuses it as stock does (TNS)" eq "$(grep -c "as NVIDIA's own does: TNS in nvidia-smi topo -p2p" <<<"$v")" 1
+  check "two root ports of one socket (same bus): opted in" eq "$(v "$pd" $A $B | cut -d'|' -f1)" opted-in
+  reset_fake; card $A 1e07 Turing 22528 32768; card $D 1e07 Turing 22528 32768
+  on_root_port 0000:00:01.0 8086 2030 $A; on_root_port 0000:40:01.0 8086 2030 $D
+  check "Skylake-SP root ports on two sockets: not in the driver's list, opted in" eq "$(v "$pd" $A $D | cut -d'|' -f1)" opted-in
+  reset_fake; card $A 1e07 Turing 22528 32768; card $D 1e07 Turing 22528 32768
+  on_root_port 0000:00:03.0 8086 6f08 $A; on_root_port 0000:40:01.1 1022 1483 $D
+  check "one listed Intel root port, one other: not refused (as in the driver)" eq "$(v "$pd" $A $D | cut -d'|' -f1)" opted-in
+  # the check and --integrity on the refused pair: TNS is expected, the pair is skipped
+  reset_fake; card $A 1e07 Turing 22528 32768; card $D 1e07 Turing 22528 32768
+  on_root_port 0000:00:03.0 8086 6f08 $A; on_root_port 0000:40:02.0 8086 6f04 $D
+  cfg "$A $D" 1
+  full_setup "pci=$A;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;pci=$D;RMForceStaticBar1=0;RMDynBar1P2PEnable=1;" TNS
+  sh_ p2p-check.sh --pairs
+  check "--pairs: the refused pair with both root ports" out_has "^$A <-> $D: not supported \(TU102 \+ TU102: the cards sit on two Intel CPU sockets, root ports 0000:00:03.0 and 0000:40:02.0;"
+  sh_ p2p-check.sh
+  check "the check: TNS for the refused pair is no FAIL" out_has "^topo -p2p r $A <-> $D: TNS \(pair unsupported: no expectation\)\$"
+  check "  ALL PASS" eq "$RC/$(grep -c '^ALL PASS$' "$CDIR/out")" "0/1"
+  standin_integrity
+  sh_ p2p-check.sh --integrity
+  check "--integrity: the refused pair is skipped, not run" out_has "^SKIP $A <-> $D: not tested \(the pair is unsupported\)\$"
+}
+run_case 26-cpu-sockets "pairs on two Intel CPU sockets refused as in stock (TNS): verdict, the check, --integrity" c26
+
+
 c10() {
   card $A 2206; card $B 2206; card $C 2206
   cfg "$A $B" ""

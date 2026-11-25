@@ -203,7 +203,8 @@ P2P is on by default for pairs of GA102 GPUs (detected by chip family). Other ch
 as stock.
 
 Like every consumer P2P patch, on a card with the route on (GA102, or opted in) it skips NVIDIA's chipset, topology and
-host checks. Tested only on X99 / Xeon E5 v4, two CPU root ports, no switch, `iommu=pt`.
+host checks, all but one: two cards on two Intel CPU sockets of the older server generations stay refused, as in stock
+([below](#slow-p2p-across-cpu-sockets)). Tested only on X99 / Xeon E5 v4, two CPU root ports, no switch, `iommu=pt`.
 
 ### When a pair is refused
 
@@ -215,10 +216,42 @@ A pair is refused when either card:
 - has BAR1 smaller than VRAM,
 - or has a non-zero `nv_dynbar1_calib`/`nv_dynbar1_delta`.
 
-It is also refused when `RMForceP2PType`/`RMPcieP2PType` excludes BAR1 P2P.
+It is also refused when `RMForceP2PType`/`RMPcieP2PType` excludes BAR1 P2P, and when the two cards sit on two Intel CPU
+sockets of the Sandy Bridge-EP to Broadwell-EP/EX generations ([below](#slow-p2p-across-cpu-sockets)).
 
 A refused pair gets no peer access (`cudaDeviceCanAccessPeer` 0, copies staged through the host). The kernel log gets
 rate-limited `DynBar1P2P:` error lines naming the card and the reason.
+
+### Slow P2P across CPU sockets
+
+On a server with two or more CPU sockets, P2P between cards on different sockets crosses the link between the CPUs
+(QPI, UPI). On Intel's older server CPUs that path is far slower than copying through host memory. An outside report
+measured it on an HP DL580 Gen9 with four Xeon E7-8890 v4 and RTX 2080 Ti cards on PCIe 3.0 x16 root ports of
+different sockets: about 0.23 GB/s for peer writes (`cudaMemcpyPeer`, kernel stores) and 1.3 GB/s for peer reads,
+every copy byte-exact, while copies through host memory on the same machine ran about 25 times faster. Turning ACS
+off or the IOMMU off raised it to at most 0.4 GB/s.
+
+NVIDIA's stock driver refuses such pairs: for the Intel root ports of the X58/5520 IOH and of Sandy Bridge-EP, Ivy
+Bridge-EP/EX, Haswell-EP/EX and Broadwell-EP/EX (device IDs `3408`-`3411`, `3420`, `3421`, `3c02`-`3c0b`,
+`0e02`-`0e0b`, `2f01`-`2f0b`, `6f01`-`6f0b`), two cards whose root ports sit on different buses (one per socket) get
+`TNS` (topology not supported) in `nvidia-smi topo -p2p r`. Up to `b70b69c` this driver skipped that check with the
+rest, offered P2P on those pairs (`OK`), and programs used the slow path. It now keeps it: such a pair gets `TNS`, no
+peer access, copies staged through host memory, a `DynBar1P2P: ... peer on another Intel CPU socket` line in the
+kernel log, and `p2p-check.sh --pairs` says `not supported` with both root ports. Cards on one socket, and NVLink
+pairs on any socket, are not affected. To measure the slow path anyway, set `ForceP2P=0x11` for the cards
+(`NVreg_RegistryDwords`, as in stock); `p2p-check.sh` still lists the pair as not supported and skips it, so run
+`contrib/integrity/p2p-integrity --pair A B` by hand.
+
+Other platforms (Intel from Skylake-SP on, AMD) are not in NVIDIA's list and are not refused; nobody has measured P2P
+across their sockets with this driver. Compare the bandwidth from `p2p-check.sh --integrity` with a copy through host
+memory before you rely on it. To see which socket a card is on:
+
+```sh
+nvidia-smi topo -m
+```
+
+`SYS` between two GPUs means across sockets; `PHB`, `PXB` or `PIX` means one socket. `lspci -tv` shows the root
+port above each card, and `cat /sys/bus/pci/devices/<card>/numa_node` its socket.
 
 ### Changes on top of dingiv's branch
 
