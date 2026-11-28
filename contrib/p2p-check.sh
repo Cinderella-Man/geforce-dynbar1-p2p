@@ -1,7 +1,8 @@
 #!/bin/bash
 # Read-only check after a boot (or after p2p-load.sh): which build is loaded, its options, BAR1, the chip of each card,
 # the verdict for each pair, P2P as the driver reports it, and the kernel log. Loads nothing and writes nothing.
-# Exit status = number of FAIL lines.
+# Exit status = number of FAIL lines. A clean run ends in "SETUP OK, DATA NOT CHECKED": the driver offering P2P
+# (topo OK) is no proof that data arrives; only --integrity checks the data and ends in "ALL PASS".
 #   --pairs       only the cards (chip, BAR1, VRAM, RMDynBar1P2PEnable) and the verdict for each pair: verified (on),
 #                 opted in (on), untested (run --integrity, then enable), off, stock, not supported (why). No root
 #                 needed; with GPUS empty, every NVIDIA display or 3D controller.
@@ -155,7 +156,9 @@ for k in r w; do
     c=; [ -z "${IDX[$a]:-}" ] || [ -z "${IDX[$b]:-}" ] || c=$(topo_cell "$t" "${IDX[$a]}" "${IDX[$b]}")
     s=${VSTATE["$a $b"]}
     case $s in
-      verified | default | opted-in) want "topo -p2p $k $a <-> $b: OK" "topo -p2p $k $a <-> $b: '${c:-?}' although the pair is $s" [ "$c" = OK ] ;;
+      # OK only says the driver offers P2P: two cards behind one chipset, a translating IOMMU or a 16 GB Blackwell card
+      # without static BAR1 showed OK while the data was lost. Only --integrity moves data.
+      verified | default | opted-in) want "topo -p2p $k $a <-> $b: OK (P2P offered; no data check)" "topo -p2p $k $a <-> $b: '${c:-?}' although the pair is $s" [ "$c" = OK ] ;;
       untested | off) want "topo -p2p $k $a <-> $b: ${c:-?} (P2P off, as the pair is $s)" "topo -p2p $k $a <-> $b: OK although the pair is $s" [ "$c" != OK ] ;;
       *) echo "topo -p2p $k $a <-> $b: ${c:-?} (pair $s: no expectation)" ;;
     esac
@@ -273,5 +276,9 @@ if [ "$MODE" = integrity ]; then
     "driver_option=on where geforce-bar1-resize keeps static BAR1): sudo $HERE/p2p-enable.sh --yes$need"
 fi
 
-if [ "$FAILS" = 0 ]; then echo "ALL PASS"; else echo "$FAILS FAIL line(s). Back to stock: $HERE/p2p-fallback.sh --yes --live"; fi
+# ALL PASS only when the data was checked: without --integrity nothing above moved any data, so a clean run says so
+# instead (same exit status).
+if [ "$FAILS" != 0 ]; then echo "$FAILS FAIL line(s). Back to stock: $HERE/p2p-fallback.sh --yes --live"
+elif [ "$MODE" = integrity ]; then echo "ALL PASS"
+else echo "SETUP OK, DATA NOT CHECKED: nothing above moves data; $HERE/p2p-check.sh --integrity checks every byte"; fi
 exit "$FAILS"

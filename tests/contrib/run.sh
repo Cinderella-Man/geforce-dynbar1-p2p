@@ -400,10 +400,11 @@ c06() {
   cfg "$A $B" ""
   full_setup "pci=$A;RMForceStaticBar1=0;pci=$B;RMForceStaticBar1=0;" OK
   sh_ p2p-check.sh
-  check "verified pair, topo OK: ALL PASS" out_has '^ALL PASS$'
+  check "verified pair, topo OK: SETUP OK, DATA NOT CHECKED (no ALL PASS without --integrity)" out_has '^SETUP OK, DATA NOT CHECKED: nothing above moves data; .*/p2p-check.sh --integrity checks every byte$'
+  check "  no ALL PASS line" eq "$(grep -c '^ALL PASS$' "$CDIR/out")" 0
   check "status 0" eq "$RC" 0
   check "BAR1 >= VRAM line" out_has "^PASS $A BAR1 32768 MiB >= VRAM 20480 MiB\$"
-  check "topo per pair" out_has "^PASS topo -p2p r $A <-> $B: OK\$"
+  check "topo per pair, OK read as offered" out_has "^PASS topo -p2p r $A <-> $B: OK \(P2P offered; no data check\)\$"
   topo NS
   sh_ p2p-check.sh
   check "verified pair, topo NS: FAIL" out_has "^FAIL topo -p2p w $A <-> $B: 'NS' although the pair is verified\$"
@@ -411,13 +412,13 @@ c06() {
   cfg "$A $B" ""
   full_setup "pci=$A;RMForceStaticBar1=0;pci=$B;RMForceStaticBar1=0;" OK
   sh_ p2p-check.sh
-  check "RTX 3090 pair, topo OK: ALL PASS" out_has '^ALL PASS$'
+  check "RTX 3090 pair, topo OK: SETUP OK, DATA NOT CHECKED" out_has '^SETUP OK, DATA NOT CHECKED: nothing above moves data; .*/p2p-check.sh --integrity checks every byte$'
   check "RTX 3090 pair: on by default, untested, run --integrity once" out_has "^$A <-> $B: on by default, untested \(GA102 \+ GA102: only the RTX 3080 20GB is verified\): run p2p-check.sh --integrity once"
   reset_fake; card $A 2482; card $B 2482
   cfg "$A $B" ""
   full_setup "pci=$A;RMForceStaticBar1=0;pci=$B;RMForceStaticBar1=0;" NS
   sh_ p2p-check.sh
-  check "untested GA104 pair, topo NS: ALL PASS" out_has '^ALL PASS$'
+  check "untested GA104 pair, topo NS: SETUP OK, DATA NOT CHECKED" out_has '^SETUP OK, DATA NOT CHECKED: nothing above moves data; .*/p2p-check.sh --integrity checks every byte$'
   check "untested shown with what to do" out_has "^$A <-> $B: untested \(GA104 \+ GA104\)"
   topo OK
   sh_ p2p-check.sh
@@ -478,6 +479,7 @@ c07() {
   sh_ p2p-check.sh --integrity --max-mib 64
   check "opted-in pair, integrity PASS: status 0" eq "$RC" 0
   check "integrity line with size and cases" out_has "^PASS integrity $A <-> $B \(max-mib 64, 264 cases\)\$"
+  check "  the data checked: ALL PASS, no SETUP line" eq "$(grep -c '^ALL PASS$' "$CDIR/out")/$(grep -c '^SETUP OK' "$CDIR/out")" "1/0"
   check "the test got the pair and the size" out_has "^  p2p-integrity stand-in --pair $A $B --max-mib 64"
   check "PASS recorded with ids, size and cases" has "$FAKE/var/lib/geforce-dynbar1-p2p/integrity-pass" " PASS $A 10de:2482/10de:146d $B 10de:2482/10de:146d nvidia SRC-nvidia .*max-mib 64 cases 264\$"
   check "a short run is named as not counting for p2p-enable" out_has "^note: a run below --max-mib 4096 \(264 cases\) does not count for p2p-enable.sh\$"
@@ -724,7 +726,7 @@ c14() {
   echo "\$ contrib/3080-20g/p2p-check.sh (old config P2P_ENABLE=1)" >>"$LOG"
   "$SRC/contrib/3080-20g/p2p-check.sh" >"$CDIR/out" 2>&1; RC=$?
   sed 's/^/  | /' "$CDIR/out" >>"$LOG"
-  check "old config.sh with P2P_ENABLE=1 (its documented default): boot install ALL PASS" out_has '^ALL PASS$'
+  check "old config.sh with P2P_ENABLE=1 (its documented default): boot install SETUP OK, DATA NOT CHECKED" out_has '^SETUP OK, DATA NOT CHECKED: nothing above moves data; .*/p2p-check.sh --integrity checks every byte$'
   check "  with a note on the old meaning" out_has '^note: P2P_ENABLE=1 from contrib/3080-20g/config.sh is the driver default there'
   check "the old config.sh in the repository documents it" has "$PUB/contrib/3080-20g/config.sh" 'with this file the'
   cp "$PUB/contrib/3080-20g/config.sh" "$SRC/contrib/3080-20g/config.sh"
@@ -1051,7 +1053,7 @@ c26() {
   check "--pairs: the refused pair with both root ports" out_has "^$A <-> $D: not supported \(TU102 \+ TU102: the cards sit on two Intel CPU sockets, root ports 0000:00:03.0 and 0000:40:02.0;"
   sh_ p2p-check.sh
   check "the check: TNS for the refused pair is no FAIL" out_has "^topo -p2p r $A <-> $D: TNS \(pair unsupported: no expectation\)\$"
-  check "  ALL PASS" eq "$RC/$(grep -c '^ALL PASS$' "$CDIR/out")" "0/1"
+  check "  SETUP OK, DATA NOT CHECKED" eq "$RC/$(grep -c '^SETUP OK, DATA NOT CHECKED: ' "$CDIR/out")" "0/1"
   standin_integrity
   sh_ p2p-check.sh --integrity
   check "--integrity: the refused pair is skipped, not run" out_has "^SKIP $A <-> $D: not tested \(the pair is unsupported\)\$"

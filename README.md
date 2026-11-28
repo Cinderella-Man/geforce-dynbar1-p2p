@@ -311,7 +311,8 @@ Nothing is installed this way; a reboot loads what modprobe resolves.
 
 ```sh
 sudo contrib/p2p-load.sh --yes       # from stock or this build: insmods the build with the options below
-sudo contrib/p2p-check.sh            # read-only; exit status = number of FAIL lines
+sudo contrib/p2p-check.sh            # read-only; exit status = number of FAIL lines; moves no data, so a clean run
+                                     # ends in SETUP OK, DATA NOT CHECKED (--integrity checks the data: ALL PASS)
 sudo contrib/p2p-rollback.sh --yes   # stock without a reboot (by path if a boot install exists; it stays)
 sudo contrib/p2p-rollback.sh --yes --to-installed   # reload the boot install instead
 ```
